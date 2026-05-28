@@ -40,6 +40,59 @@ def get_recent_shots(limit: int = 5) -> str:
     except Exception as e:
         return f"Database error: {str(e)}"
 
+@mcp.tool()
+def seed_knowledge_graph() -> str:
+    """
+    Seeds the knowledge_nodes and knowledge_edges Supabase tables with static coffee domain knowledge.
+    Uses upsert to safely re-run without creating duplicates.
+    Requires SUPABASE_KEY to be set to the service role key (not anon key).
+    """
+    try:
+        from knowledge_graph import NODES, EDGE_DEFINITIONS
+
+        # Upsert all nodes; conflict key is (node_type, name)
+        nodes_res = supabase.table("knowledge_nodes").upsert(
+            NODES, on_conflict="node_type,name"
+        ).execute()
+        node_count = len(nodes_res.data)
+
+        # Fetch all nodes to build a (node_type, name) -> id lookup
+        all_nodes_res = supabase.table("knowledge_nodes").select("id, node_type, name").execute()
+        node_id_map = {(n["node_type"], n["name"]): n["id"] for n in all_nodes_res.data}
+
+        # Resolve edge definitions to concrete source_id / target_id values
+        edges = []
+        skipped_edges = []
+        for edge_def in EDGE_DEFINITIONS:
+            src_id = node_id_map.get(edge_def["source"])
+            tgt_id = node_id_map.get(edge_def["target"])
+
+            if src_id is None or tgt_id is None:
+                skipped_edges.append(f"{edge_def['source']} -> {edge_def['target']}")
+                continue
+
+            edges.append({
+                "source_id": src_id,
+                "target_id": tgt_id,
+                "relationship_type": edge_def["relationship"],
+                "properties": edge_def["properties"],
+            })
+
+        # Upsert edges; conflict key is (source_id, target_id, relationship_type)
+        edges_res = supabase.table("knowledge_edges").upsert(
+            edges, on_conflict="source_id,target_id,relationship_type"
+        ).execute()
+        edge_count = len(edges_res.data)
+
+        summary = f"Knowledge graph seeded: {node_count} nodes inserted/updated, {edge_count} edges inserted/updated."
+        if skipped_edges:
+            summary += f"\nSkipped {len(skipped_edges)} edges (nodes not found): {', '.join(skipped_edges)}"
+        return summary
+
+    except Exception as e:
+        return f"Error seeding knowledge graph: {str(e)}"
+
+
 if __name__ == "__main__":
     # Run the server via stdio (standard MCP transport)
     mcp.run()
