@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+from fastapi import FastAPI
 from supabase import create_client, Client
 from mcp.server.fastmcp import FastMCP
 
@@ -170,3 +171,23 @@ def analyze_best_value_coffees() -> str:
 
     except Exception as e:
         return f"Error analyzing beans: {str(e)}"
+
+
+# ---------------------------------------------------------------------------
+# ASGI app — used by uvicorn for cloud / SSE deployment:
+#   uvicorn server:app --host 0.0.0.0 --port 8000
+#
+# All MCP tools are registered on `mcp` by this point in the file, so the
+# SSE app picks them up correctly.  The stdio entrypoint (`python server.py`)
+# is preserved by the __main__ guard above.
+# ---------------------------------------------------------------------------
+app = FastAPI(title="Coffee Barista MCP Server")
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "server": "Coffee Barista MCP"}
+
+
+# Mount the MCP SSE transport — exposes GET /sse and POST /messages/
+app.mount("/", mcp.sse_app())
