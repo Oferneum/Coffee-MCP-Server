@@ -804,6 +804,236 @@ def semantic_search(query: str, match_count: int = 3) -> str:
 
 
 # ---------------------------------------------------------------------------
+# UNIFIED SEARCH — ORCHESTRATOR
+# Private helpers below are plain Python functions, not MCP tools.
+# They return raw data structures so unified_search can synthesize them.
+# ---------------------------------------------------------------------------
+
+def _embed(text: str) -> list[float]:
+    response = openai_client.embeddings.create(
+        input=text.strip().replace("\n", " "),
+        model="text-embedding-3-small",
+    )
+    return response.data[0].embedding
+
+
+def _vector_search_raw(embedding: list[float], threshold: float = 0.2, count: int = 5) -> list[dict]:
+    resp = supabase.rpc("match_knowledge_nodes", {
+        "query_embedding": embedding,
+        "match_threshold":  threshold,
+        "match_count":      count,
+    }).execute()
+    return resp.data or []
+
+
+def _extract_mentioned_nodes(query: str) -> list[dict]:
+    """
+    Scan every node name in the graph against the query string.
+    Case-insensitive substring match — handles "Ethiopian" → "Ethiopia",
+    "french press" → "French Press", etc. because the node name is a
+    substring of the user's word.
+    """
+    all_nodes = supabase.table("knowledge_nodes")\
+        .select("id, node_type, name, properties")\
+        .execute().data
+    q = query.lower()
+    return [n for n in all_nodes if n["name"].lower() in q]
+
+
+def _enrich_node(node: dict, similarity: float | None = None) -> str:
+    """
+    Build a rich context block for a single node:
+      • Top 4 properties
+      • Up to 5 outbound and 3 inbound 1-hop graph connections
+
+    Makes 3 DB queries per call; keep enriched nodes ≤ 3 per unified_search
+    invocation to stay performant.
+    """
+    sim_tag = f"  (similarity: {similarity:.4f})" if similarity is not None else ""
+    lines = [f"  [{node.get('node_type','?')}] {node.get('name','?')}{sim_tag}"]
+
+    # Properties snippet
+    props = node.get("properties") or {}
+    for k, v in list(props.items())[:4]:
+        val = ", ".join(str(x) for x in v) if isinstance(v, list) else str(v)
+        lines.append(f"    {k}: {val}")
+
+    # 1-hop graph connections
+    node_id = node.get("id")
+    if not node_id:
+        return "\n".join(lines)
+
+    out_edges = supabase.table("knowledge_edges")\
+        .select("target_id, relationship_type, properties")\
+        .eq("source_id", node_id).execute().data
+    in_edges = supabase.table("knowledge_edges")\
+        .select("source_id, relationship_type, properties")\
+        .eq("target_id", node_id).execute().data
+
+    nb_ids = [e["target_id"] for e in out_edges] + [e["source_id"] for e in in_edges]
+    if nb_ids:
+        nb_map = {n["id"]: n for n in supabase.table("knowledge_nodes")
+                  .select("id, node_type, name").in_("id", nb_ids).execute().data}
+
+        if out_edges:
+            lines.append("    Connects to:")
+            for e in out_edges[:5]:
+                nb = nb_map.get(e["target_id"], {})
+                conf = e["properties"].get("confidence", "?")
+                lines.append(f"      → {e['relationship_type']} → "
+                             f"[{nb.get('node_type','?')}] {nb.get('name','?')}  (conf: {conf})")
+        if in_edges:
+            lines.append("    Referenced by:")
+            for e in in_edges[:3]:
+                nb = nb_map.get(e["source_id"], {})
+                lines.append(f"      ← {e['relationship_type']} ← "
+                             f"[{nb.get('node_type','?')}] {nb.get('name','?')}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def unified_search(query: str) -> str:
+    """
+    UNIFIED SEARCH ORCHESTRATOR — This is the ONLY tool you need to call for
+    the vast majority of user queries. It combines vector-semantic lookup with
+    structured graph traversal and returns a single, context-rich response.
+
+    DO NOT call semantic_search(), search_nodes(), or get_node_connections()
+    manually before calling this tool — unified_search runs all of them
+    internally and synthesises the results intelligently.
+
+    INTERNAL PIPELINE:
+    1. ENTITY EXTRACTION — scans every node name in the graph against the
+       raw query string (case-insensitive substring match). Any node whose
+       name appears in the query is flagged as an "identified entity" and
+       given top priority in the response.
+    2. SEMANTIC VECTOR SEARCH — embeds the query with text-embedding-3-small
+       and calls the pgvector `match_knowledge_nodes` RPC. Results are
+       bucketed by confidence:
+         • HIGH (similarity ≥ 0.6): treated as strong semantic matches,
+           enriched with full graph connections.
+         • SUPPORTING (0.2–0.6): shown as additional context without full
+           graph enrichment.
+    3. CONTEXT ENRICHMENT — for every node in the top tier (identified
+       entities + high-confidence hits, up to 3 total), fetches its
+       1-hop graph neighbourhood: outbound relationships and inbound
+       references with confidence scores. This gives the LLM a full
+       "node profile" rather than a dry snippet.
+    4. DEDUPLICATION — each node appears at most once across all sections,
+       regardless of how many pipelines surface it.
+
+    SYNTHESIS LOGIC:
+    - Explicitly mentioned nodes always appear first (they are ground truth).
+    - High-similarity vector matches are surfaced next; if they overlap with
+      mentioned nodes, the graph enrichment is shared.
+    - If both pipelines return nothing, the tool says so clearly rather than
+      hallucinating an answer.
+
+    WHEN TO USE:
+    - Any natural-language question about coffee: brewing, origins, flavours,
+      equipment, pairings, techniques.
+    - Vague / emotional queries: "something for cold mornings", "cozy",
+      "bright and energising" — vector search handles these.
+    - Specific node queries: "How does V60 work?", "Tell me about Ethiopia" —
+      entity extraction pins the exact graph node.
+    - Mixed queries: "How do I brew light roast coffee?" — extracts
+      "Light Roast" as an entity AND finds semantically similar brewing nodes.
+
+    WHEN TO USE A DIFFERENT TOOL INSTEAD:
+    - You need to trace a multi-hop path between two specific nodes →
+      find_paths().
+    - You need all nodes of one type for an inventory → get_nodes_by_type().
+    - You need full structured BrewingRule JSONB for advice grounding →
+      get_brewing_rules_for_method().
+
+    RETURNS: A structured, ranked response with three sections:
+      1. Identified Entities — exact node matches with full graph context.
+      2. High-Confidence Semantic Matches — strong vector hits with graph context.
+      3. Supporting Context — lower-confidence vector results for reference.
+
+    Args:
+        query: Any natural-language question or concept. Can be a full sentence,
+               a flavour description, a brewing scenario, or a node name.
+    """
+    try:
+        sections: list[str] = []
+        seen_ids: set[str] = set()
+
+        # ── Step 1: Entity extraction ─────────────────────────────────────────
+        mentioned = _extract_mentioned_nodes(query)
+
+        # ── Step 2: Semantic vector search ───────────────────────────────────
+        embedding   = _embed(query)
+        vector_hits = _vector_search_raw(embedding, threshold=0.2, count=5)
+
+        high_conf = [r for r in vector_hits if (r.get("similarity") or 0) >= 0.6]
+        low_conf  = [r for r in vector_hits if 0.2 <= (r.get("similarity") or 0) < 0.6]
+
+        # ── Header ───────────────────────────────────────────────────────────
+        sections.append(
+            f"Unified search: '{query}'\n"
+            f"  {len(mentioned)} entity mention(s)  |  "
+            f"{len(vector_hits)} vector hit(s)  |  "
+            f"{len(high_conf)} high-confidence (≥ 0.6)\n"
+        )
+
+        # ── Step 3 & 4: Enrich top nodes (cap at 3 total to stay performant) ─
+        enrich_budget = 3
+
+        if mentioned:
+            sections.append("── IDENTIFIED ENTITIES (explicitly mentioned in query) ──")
+            for node in mentioned[:enrich_budget]:
+                if node["id"] not in seen_ids:
+                    seen_ids.add(node["id"])
+                    sections.append(_enrich_node(node))
+                    sections.append("")
+                    enrich_budget -= 1
+
+        if high_conf and enrich_budget > 0:
+            sections.append("── HIGH-CONFIDENCE SEMANTIC MATCHES (similarity ≥ 0.6) ──")
+            for r in high_conf:
+                if enrich_budget <= 0:
+                    break
+                r_id = r.get("id")
+                if r_id and r_id not in seen_ids:
+                    seen_ids.add(r_id)
+                    sections.append(_enrich_node(r, similarity=r.get("similarity")))
+                    sections.append("")
+                    enrich_budget -= 1
+
+        # ── Step 5: Supporting context — lighter treatment ────────────────────
+        remaining = [r for r in low_conf if r.get("id") not in seen_ids]
+        if remaining:
+            sections.append("── SUPPORTING CONTEXT (similarity 0.2–0.6) ──")
+            for r in remaining[:3]:
+                props = r.get("properties") or {}
+                snippet = "  |  ".join(
+                    f"{k}: {', '.join(str(x) for x in v) if isinstance(v, list) else v}"
+                    for k, v in list(props.items())[:2]
+                )
+                sections.append(
+                    f"  [{r.get('node_type','?')}] {r.get('name','?')}  "
+                    f"(similarity: {r.get('similarity', 0):.4f})"
+                )
+                if snippet:
+                    sections.append(f"  {snippet}")
+                sections.append("")
+
+        # ── Fallback ─────────────────────────────────────────────────────────
+        if len(sections) <= 1:
+            return (
+                f"No results found for: '{query}'.\n"
+                "Try rephrasing, or call search_nodes() for an exact keyword lookup."
+            )
+
+        return "\n".join(sections)
+
+    except Exception as e:
+        return f"Error in unified_search: {str(e)}"
+
+
+# ---------------------------------------------------------------------------
 # ASGI app — used by uvicorn for cloud / SSE deployment:
 #   uvicorn server:app --host 0.0.0.0 --port 8000
 #
