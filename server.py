@@ -1,37 +1,35 @@
 import os
+from collections import Counter
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from openai import OpenAI
 from supabase import create_client, Client
 from mcp.server.fastmcp import FastMCP
 
-# Load environment variables from .env file
 load_dotenv()
 
-# Initialize Supabase client
 supabase_url: str = os.environ.get("SUPABASE_URL")
 supabase_key: str = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(supabase_url, supabase_key)
 
-# Initialize OpenAI client (OPENAI_API_KEY read from environment)
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-# Initialize the MCP server instance
 mcp = FastMCP("Coffee Barista MCP", host="0.0.0.0")
 
-@mcp.tool()
-def get_recent_shots(limit: int = 5) -> str:
-    """
-    Fetch the user's most recent espresso and coffee shots from Supabase.
-    Use this tool to analyze trends, history, or extraction parameters.
-    """
+
+# =============================================================================
+# PRIVATE HELPERS — plain Python functions, not MCP tools.
+# These are the internal plumbing called by the 4 public tools below.
+# =============================================================================
+
+# --- Formerly public tools, now internal data-access helpers -----------------
+
+def _get_recent_shots(limit: int = 5) -> str:
     try:
         response = supabase.table("shots").select("*").order("created_at", desc=True).limit(limit).execute()
         data = response.data
-        
         if not data:
             return "No coffee shots found in the database."
-        
         result = ["Recent coffee shots:\n"]
         for shot in data:
             result.append(
@@ -39,181 +37,59 @@ def get_recent_shots(limit: int = 5) -> str:
                 f"Dose: {shot.get('dose')}g | Yield: {shot.get('yield')}g | "
                 f"Time: {shot.get('extraction_time')}s | Score: {shot.get('overall_score')}/10"
             )
-        
         return "\n".join(result)
-        
     except Exception as e:
         return f"Database error: {str(e)}"
 
-@mcp.tool()
-def seed_knowledge_graph() -> str:
-    """
-    Seeds the knowledge_nodes and knowledge_edges Supabase tables with static coffee domain knowledge.
-    Uses upsert to safely re-run without creating duplicates.
-    Requires SUPABASE_KEY to be set to the service role key (not anon key).
-    """
+
+def _analyze_best_value_coffees() -> str:
     try:
-        from knowledge_graph import NODES, EDGE_DEFINITIONS
-
-        # Upsert all nodes; conflict key is (node_type, name)
-        nodes_res = supabase.table("knowledge_nodes").upsert(
-            NODES, on_conflict="node_type,name"
-        ).execute()
-        node_count = len(nodes_res.data)
-
-        # Fetch all nodes to build a (node_type, name) -> id lookup
-        all_nodes_res = supabase.table("knowledge_nodes").select("id, node_type, name").execute()
-        node_id_map = {(n["node_type"], n["name"]): n["id"] for n in all_nodes_res.data}
-
-        # Resolve edge definitions to concrete source_id / target_id values
-        edges = []
-        skipped_edges = []
-        for edge_def in EDGE_DEFINITIONS:
-            src_id = node_id_map.get(edge_def["source"])
-            tgt_id = node_id_map.get(edge_def["target"])
-
-            if src_id is None or tgt_id is None:
-                skipped_edges.append(f"{edge_def['source']} -> {edge_def['target']}")
-                continue
-
-            edges.append({
-                "source_id": src_id,
-                "target_id": tgt_id,
-                "relationship_type": edge_def["relationship"],
-                "properties": edge_def["properties"],
-            })
-
-        # Upsert edges; conflict key is (source_id, target_id, relationship_type)
-        edges_res = supabase.table("knowledge_edges").upsert(
-            edges, on_conflict="source_id,target_id,relationship_type"
-        ).execute()
-        edge_count = len(edges_res.data)
-
-        summary = f"Knowledge graph seeded: {node_count} nodes inserted/updated, {edge_count} edges inserted/updated."
-        if skipped_edges:
-            summary += f"\nSkipped {len(skipped_edges)} edges (nodes not found): {', '.join(skipped_edges)}"
-        return summary
-
-    except Exception as e:
-        return f"Error seeding knowledge graph: {str(e)}"
-
-
-if __name__ == "__main__":
-    # Run the server via stdio (standard MCP transport)
-    mcp.run()
-
-
-@mcp.tool()
-def analyze_best_value_coffees() -> str:
-    """
-    Analyzes all coffee beans to find the best Value for Money (VFM).
-    Calculates average user scores, price per 100g, and identifies the best brew methods for each bean.
-    Use this tool when the user asks for recommendations, the best coffee, or price/value analysis.
-    """
-    try:
-        # 1. Fetch beans and shots from Supabase
         beans_response = supabase.table("beans").select("id, roaster, origin, price_paid, weight_grams").execute()
         shots_response = supabase.table("shots").select("bean_id, overall_score, brew_method").execute()
-        
         beans = beans_response.data
         shots = [s for s in shots_response.data if s.get("overall_score") is not None and s.get("bean_id") is not None]
-
         if not beans or not shots:
             return "Not enough data to perform VFM analysis."
-
-        # 2. Aggregate shots by bean_id
-        bean_stats = {}
+        bean_stats: dict = {}
         for shot in shots:
             b_id = shot["bean_id"]
             score = shot["overall_score"]
             method = shot["brew_method"]
-
             if b_id not in bean_stats:
                 bean_stats[b_id] = {"scores": [], "methods": {}}
-            
             bean_stats[b_id]["scores"].append(score)
-            
             if method not in bean_stats[b_id]["methods"]:
                 bean_stats[b_id]["methods"][method] = []
             bean_stats[b_id]["methods"][method].append(score)
-
-        # 3. Calculate metrics and format the report
-        result = ["☕ Coffee Value For Money (VFM) & Brew Analysis:\n"]
-        
+        result = ["Value For Money (VFM) & Brew Analysis:\n"]
         for bean in beans:
             b_id = bean.get("id")
             stats = bean_stats.get(b_id)
-            
             if not stats:
-                continue # Skip beans with no logged shots
-
+                continue
             avg_score = sum(stats["scores"]) / len(stats["scores"])
-            
-            # Calculate the most successful brew method
-            method_avgs = {m: sum(s)/len(s) for m, s in stats["methods"].items()}
+            method_avgs = {m: sum(s) / len(s) for m, s in stats["methods"].items()}
             best_method = max(method_avgs, key=method_avgs.get)
-
             price = bean.get("price_paid")
             weight = bean.get("weight_grams")
-            
-            # Calculate VFM if price and weight exist
             if price and weight and float(weight) > 0:
                 price_per_100g = (float(price) / float(weight)) * 100
                 vfm_index = avg_score / price_per_100g if price_per_100g > 0 else 0
                 cost_str = f"${price_per_100g:.2f} per 100g | VFM Index: {vfm_index:.2f}"
             else:
                 cost_str = "Price/Weight data missing"
-
             result.append(
-                f"🔹 {bean.get('roaster')} - {bean.get('origin')}\n"
-                f"   • Overall Score: {avg_score:.1f}/10 (based on {len(stats['scores'])} shots)\n"
-                f"   • Value: {cost_str}\n"
-                f"   • Best Method: {best_method} (Avg: {method_avgs[best_method]:.1f}/10)\n"
+                f"  {bean.get('roaster')} - {bean.get('origin')}\n"
+                f"    Overall Score : {avg_score:.1f}/10 ({len(stats['scores'])} shots)\n"
+                f"    Value         : {cost_str}\n"
+                f"    Best Method   : {best_method} (avg {method_avgs[best_method]:.1f}/10)\n"
             )
-
         return "\n".join(result)
-
     except Exception as e:
         return f"Error analyzing beans: {str(e)}"
 
 
-# ---------------------------------------------------------------------------
-# GRAPH-RAG TOOLS
-# ---------------------------------------------------------------------------
-
-@mcp.tool()
-def search_nodes(keyword: str, node_type: str = "") -> str:
-    """
-    ENTITY RESOLUTION — Use this as your FIRST call whenever you need to look
-    up a concept in the knowledge graph but only have a partial, approximate,
-    or user-supplied name (e.g. "ethiopian", "v60", "french").
-
-    Performs a case-insensitive partial match (ilike) on the `name` column.
-    Optionally filters to a single node_type so you can narrow results.
-
-    WHEN TO USE:
-    - User mentions "Ethiopian coffee" → search_nodes("ethiopia") to confirm
-      the exact node name and ID before any traversal.
-    - You want every available FlavorNote → search_nodes("", "FlavorNote").
-    - You are unsure whether a concept exists in the graph at all.
-
-    RETURNS: Matching nodes with id, node_type, name, and full properties.
-
-    MULTI-HOP PATTERN:
-    Step 1 → search_nodes("ethiopia")          — resolve the exact name
-    Step 2 → get_node_connections("Ethiopia")  — see all 1-hop neighbours
-    Step 3 → traverse_by_relationship(...)     — follow a specific edge type
-
-    Valid node_type values (case-sensitive, leave blank for all types):
-      Origin, ProcessMethod, RoastLevel, FlavorNote, BrewMethod,
-      BrewingRule, BrewParameter, EquipmentType, GrindProfile
-
-    Args:
-        keyword:   Partial or full name to search for. Case-insensitive.
-                   Pass an empty string to list all nodes of a given type.
-        node_type: Optional exact node_type filter. Leave empty to search
-                   across all node types.
-    """
+def _search_nodes(keyword: str, node_type: str = "") -> str:
     try:
         query = supabase.table("knowledge_nodes").select("id, node_type, name, properties")
         if keyword:
@@ -221,11 +97,9 @@ def search_nodes(keyword: str, node_type: str = "") -> str:
         if node_type:
             query = query.eq("node_type", node_type)
         resp = query.order("node_type").execute()
-
         if not resp.data:
             suffix = f" with node_type='{node_type}'" if node_type else ""
             return f"No nodes found matching '{keyword}'{suffix}."
-
         lines = [f"Found {len(resp.data)} node(s):\n"]
         for n in resp.data:
             lines.append(f"  [{n['node_type']}] {n['name']}")
@@ -238,33 +112,7 @@ def search_nodes(keyword: str, node_type: str = "") -> str:
         return f"Error searching nodes: {str(e)}"
 
 
-@mcp.tool()
-def get_node_connections(node_name: str) -> str:
-    """
-    LOCAL NEIGHBOURHOOD — Returns ALL edges connected to a node (outbound AND
-    inbound), giving the LLM a complete 1-hop view of a concept's relationships.
-
-    Resolves the node by exact name first, then falls back to a partial match.
-    For each edge the relationship type, direction, connected node type/name,
-    and confidence score are returned.
-
-    WHEN TO USE:
-    - You know a node name and want to explore everything it connects to before
-      deciding which edge type to follow.
-    - Starting-point survey before narrowing with traverse_by_relationship().
-    - Understanding the full context of a concept in one call.
-
-    RETURNS: Outbound edges (→) and inbound edges (←) with relationship types,
-    neighbour node types/names, and per-edge confidence scores.
-
-    MULTI-HOP PATTERN:
-    1. search_nodes("v60")           → confirm exact name "V60"
-    2. get_node_connections("V60")   → see all connections
-    3. traverse_by_relationship("V60", "EMPHASIZES") → drill into flavour notes
-
-    Args:
-        node_name: Exact or approximate name of the node to inspect.
-    """
+def _get_node_connections(node_name: str) -> str:
     try:
         candidates = supabase.table("knowledge_nodes").select("id, node_type, name").eq("name", node_name).execute().data
         if not candidates:
@@ -274,68 +122,31 @@ def get_node_connections(node_name: str) -> str:
         if len(candidates) > 1:
             names = ", ".join(f"{c['node_type']}:{c['name']}" for c in candidates)
             return f"Multiple nodes match '{node_name}': {names}. Please be more specific."
-
         node = candidates[0]
         node_id = node["id"]
-
         out_resp = supabase.table("knowledge_edges").select("target_id, relationship_type, properties").eq("source_id", node_id).execute()
         in_resp  = supabase.table("knowledge_edges").select("source_id, relationship_type, properties").eq("target_id", node_id).execute()
-
         neighbor_ids = [e["target_id"] for e in out_resp.data] + [e["source_id"] for e in in_resp.data]
         if not neighbor_ids:
             return f"Node '{node['name']}' ({node['node_type']}) exists but has no edges."
-
         nb_map = {n["id"]: n for n in supabase.table("knowledge_nodes").select("id, node_type, name").in_("id", neighbor_ids).execute().data}
-
         lines = [f"Connections for [{node['node_type']}] {node['name']}:\n"]
-
         if out_resp.data:
             lines.append(f"  OUTBOUND ({len(out_resp.data)} edge(s)):")
             for e in out_resp.data:
                 nb = nb_map.get(e["target_id"], {})
                 lines.append(f"    → {e['relationship_type']} → [{nb.get('node_type','?')}] {nb.get('name','?')}  (confidence: {e['properties'].get('confidence','?')})")
-
         if in_resp.data:
             lines.append(f"\n  INBOUND ({len(in_resp.data)} edge(s)):")
             for e in in_resp.data:
                 nb = nb_map.get(e["source_id"], {})
                 lines.append(f"    ← {e['relationship_type']} ← [{nb.get('node_type','?')}] {nb.get('name','?')}  (confidence: {e['properties'].get('confidence','?')})")
-
         return "\n".join(lines)
     except Exception as e:
         return f"Error getting connections for '{node_name}': {str(e)}"
 
 
-@mcp.tool()
-def traverse_by_relationship(node_name: str, relationship_type: str, direction: str = "outbound") -> str:
-    """
-    TYPED TRAVERSAL — Follows a single, specific relationship type from a node,
-    returning only the nodes reachable via that edge. More focused than
-    get_node_connections() when you already know which relationship to explore.
-
-    Direction "inbound" enables powerful reverse queries: instead of "what does
-    Ethiopia connect to via TYPICAL_FLAVOR?", ask "which Origins connect to
-    Blueberry via TYPICAL_FLAVOR?" by passing direction="inbound" on Blueberry.
-
-    WHEN TO USE:
-    - Get all FlavorNotes for an Origin: traverse_by_relationship("Ethiopia", "TYPICAL_FLAVOR")
-    - Get all BrewMethods a rule applies to: traverse_by_relationship("Golden Ratio", "APPLIES_TO")
-    - Reverse — which rules apply to V60?: traverse_by_relationship("V60", "APPLIES_TO", "inbound")
-    - Which roast levels suppress Jasmine?: traverse_by_relationship("Jasmine", "SUPPRESSES", "inbound")
-
-    Valid relationship_type values (case-sensitive):
-      TYPICAL_FLAVOR, PRODUCES_FLAVOR, EMPHASIZES, ENHANCES, DICTATES,
-      APPLIES_TO, SUGGESTS_TEMP, PRODUCES, SUPPRESSES, PAIRS_WITH
-
-    RETURNS: Each reachable node with its type, name, top properties, and the
-    edge confidence + evidence backing the relationship.
-
-    Args:
-        node_name:         Exact or approximate starting node name.
-        relationship_type: Edge type to follow (case-sensitive).
-        direction:         "outbound" (default) to follow edges leaving the node;
-                           "inbound" to follow edges arriving at the node.
-    """
+def _traverse_by_relationship(node_name: str, relationship_type: str, direction: str = "outbound") -> str:
     try:
         candidates = supabase.table("knowledge_nodes").select("id, node_type, name").eq("name", node_name).execute().data
         if not candidates:
@@ -345,26 +156,20 @@ def traverse_by_relationship(node_name: str, relationship_type: str, direction: 
         if len(candidates) > 1:
             names = ", ".join(f"{c['node_type']}:{c['name']}" for c in candidates)
             return f"Multiple nodes match '{node_name}': {names}. Please be more specific."
-
         node = candidates[0]
         node_id = node["id"]
-
         if direction == "outbound":
             edges_resp = supabase.table("knowledge_edges").select("target_id, properties").eq("source_id", node_id).eq("relationship_type", relationship_type).execute()
             nb_id_field = "target_id"
         else:
             edges_resp = supabase.table("knowledge_edges").select("source_id, properties").eq("target_id", node_id).eq("relationship_type", relationship_type).execute()
             nb_id_field = "source_id"
-
         if not edges_resp.data:
             return f"No {direction} '{relationship_type}' edges found from '{node['name']}'."
-
         nb_ids = [e[nb_id_field] for e in edges_resp.data]
         nb_map = {n["id"]: n for n in supabase.table("knowledge_nodes").select("id, node_type, name, properties").in_("id", nb_ids).execute().data}
-
         arrow = "→" if direction == "outbound" else "←"
         lines = [f"[{node['node_type']}] {node['name']}  {arrow} {relationship_type} ({direction}) {arrow}  {len(edges_resp.data)} node(s):\n"]
-
         for e in edges_resp.data:
             nb = nb_map.get(e[nb_id_field], {})
             props = e["properties"]
@@ -374,48 +179,18 @@ def traverse_by_relationship(node_name: str, relationship_type: str, direction: 
             for k, v in list((nb.get("properties") or {}).items())[:3]:
                 lines.append(f"    {k}: {v}")
             lines.append("")
-
         return "\n".join(lines)
     except Exception as e:
         return f"Error traversing '{node_name}' via '{relationship_type}': {str(e)}"
 
 
-@mcp.tool()
-def cross_reference_nodes(node_a: str, node_b: str) -> str:
-    """
-    INTERSECTION ANALYSIS — Examines the relationship between two nodes by
-    checking (1) any direct edges between them and (2) all nodes they share as
-    mutual 1-hop neighbours (bridge concepts).
-
-    This is the go-to tool for answering comparative or compatibility questions.
-    It lets the LLM draw evidence-backed inferences without hallucinating
-    connections that don't exist in the graph.
-
-    WHEN TO USE:
-    - "Is Ethiopian coffee good for espresso?" → cross_reference_nodes("Ethiopia", "Espresso")
-    - "How does Natural processing relate to Blueberry?" → cross_reference_nodes("Natural", "Blueberry")
-    - "Does a Flat Burr Grinder affect V60 quality?" → cross_reference_nodes("Flat Burr Grinder", "V60")
-    - Any time the user asks about the relationship between two specific concepts.
-
-    RETURNS:
-    - Direct edges (if any) with relationship type, confidence, and evidence.
-    - Shared neighbour nodes — the bridge concepts that link the two nodes
-      indirectly through the graph.
-
-    MULTI-HOP TIP: If no shared neighbours are found, call find_paths() to
-    search for a longer connection chain (2-3 hops).
-
-    Args:
-        node_a: Name of the first node (exact or approximate).
-        node_b: Name of the second node (exact or approximate).
-    """
+def _cross_reference_nodes(node_a: str, node_b: str) -> str:
     try:
         def resolve(name):
             r = supabase.table("knowledge_nodes").select("id, node_type, name").eq("name", name).execute().data
             if not r:
                 r = supabase.table("knowledge_nodes").select("id, node_type, name").ilike("name", f"%{name}%").execute().data
             return r
-
         na_list, nb_list = resolve(node_a), resolve(node_b)
         if not na_list:
             return f"Node '{node_a}' not found."
@@ -425,16 +200,11 @@ def cross_reference_nodes(node_a: str, node_b: str) -> str:
             return f"'{node_a}' is ambiguous: {', '.join(n['name'] for n in na_list)}. Be more specific."
         if len(nb_list) > 1:
             return f"'{node_b}' is ambiguous: {', '.join(n['name'] for n in nb_list)}. Be more specific."
-
         na, nb = na_list[0], nb_list[0]
         id_a, id_b = na["id"], nb["id"]
-
         lines = [f"Cross-reference: [{na['node_type']}] {na['name']}  ×  [{nb['node_type']}] {nb['name']}\n"]
-
-        # Direct edges
         ab = supabase.table("knowledge_edges").select("relationship_type, properties").eq("source_id", id_a).eq("target_id", id_b).execute().data
         ba = supabase.table("knowledge_edges").select("relationship_type, properties").eq("source_id", id_b).eq("target_id", id_a).execute().data
-
         if ab or ba:
             lines.append("DIRECT EDGES:")
             for e in ab:
@@ -445,13 +215,10 @@ def cross_reference_nodes(node_a: str, node_b: str) -> str:
                 lines.append(f"  evidence: {e['properties'].get('evidence','?')}")
         else:
             lines.append("DIRECT EDGES: None — these nodes are not directly connected.")
-
-        # Shared neighbours
         def neighbor_ids(nid):
             out = {e["target_id"] for e in supabase.table("knowledge_edges").select("target_id").eq("source_id", nid).execute().data}
             inc = {e["source_id"] for e in supabase.table("knowledge_edges").select("source_id").eq("target_id", nid).execute().data}
             return out | inc
-
         shared = list((neighbor_ids(id_a) & neighbor_ids(id_b)) - {id_a, id_b})
         lines.append(f"\nSHARED NEIGHBOURS ({len(shared)} bridge node(s)):")
         if shared:
@@ -459,46 +226,18 @@ def cross_reference_nodes(node_a: str, node_b: str) -> str:
             for sn in shared_nodes:
                 lines.append(f"  [{sn['node_type']}] {sn['name']}")
         else:
-            lines.append("  None within 1 hop. Call find_paths() to search deeper.")
-
+            lines.append("  None within 1 hop.")
         return "\n".join(lines)
     except Exception as e:
         return f"Error cross-referencing '{node_a}' and '{node_b}': {str(e)}"
 
 
-@mcp.tool()
-def get_nodes_by_type(node_type: str) -> str:
-    """
-    TYPE ENUMERATION — Returns every node of a given type, giving the LLM a
-    full inventory of available concepts in a category before making any
-    recommendation. Always call this before recommending a specific node name
-    to confirm it actually exists in the graph.
-
-    WHEN TO USE:
-    - "What origins do you support?" → get_nodes_by_type("Origin")
-    - "List all brewing rules" → get_nodes_by_type("BrewingRule")
-    - "What equipment types exist?" → get_nodes_by_type("EquipmentType")
-    - Before any graph traversal that references a type, to avoid hallucinating
-      node names that do not exist.
-
-    RETURNS: All nodes of the specified type with name and a key summary
-    property tailored per type (cup profile for Origins, SCA category for
-    FlavorNotes, dictates summary for BrewingRules, etc.).
-
-    Valid node_type values (case-sensitive):
-      Origin, ProcessMethod, RoastLevel, FlavorNote, BrewMethod,
-      BrewingRule, BrewParameter, EquipmentType, GrindProfile
-
-    Args:
-        node_type: Exact node type name (case-sensitive).
-    """
+def _get_nodes_by_type(node_type: str) -> str:
     try:
         resp = supabase.table("knowledge_nodes").select("name, properties").eq("node_type", node_type).order("name").execute()
-
         if not resp.data:
             valid = "Origin, ProcessMethod, RoastLevel, FlavorNote, BrewMethod, BrewingRule, BrewParameter, EquipmentType, GrindProfile"
             return f"No nodes found for node_type='{node_type}'. Valid types: {valid}"
-
         lines = [f"All {node_type} nodes ({len(resp.data)} total):\n"]
         for n in resp.data:
             p = n["properties"]
@@ -520,54 +259,19 @@ def get_nodes_by_type(node_type: str) -> str:
         return f"Error listing nodes by type '{node_type}': {str(e)}"
 
 
-@mcp.tool()
-def get_brewing_rules_for_method(brew_method_name: str) -> str:
-    """
-    BREWING INTELLIGENCE — Retrieves every BrewingRule that APPLIES_TO a
-    specific brew method, returning the full structured JSONB for each rule:
-    which parameter it controls, the target value range, whether a PID
-    temperature controller is required, and — critically — the actionable
-    barista workaround for users without precision equipment.
-
-    This is the primary tool for generating grounded, actionable brewing advice.
-    It surfaces the Neuro-Symbolic layer of the graph: rules derived from
-    SCA standards and specialty coffee science, not from LLM training data.
-
-    WHEN TO USE:
-    - "How do I brew a great V60?" → get_brewing_rules_for_method("V60")
-    - "Give me espresso tips" → get_brewing_rules_for_method("Espresso")
-    - "What should I know about French Press?" → get_brewing_rules_for_method("French Press")
-    - ALWAYS call this before giving brewing advice so your guidance is
-      grounded in the knowledge graph, not hallucinated.
-
-    RETURNS: For each applicable BrewingRule:
-      - description, dictates (parameter + value range), pid_specificity
-        (requires_pid + reason + non_pid_alternative), confidence, evidence.
-
-    MULTI-HOP PATTERN: Combine with traverse_by_relationship(method, "EMPHASIZES")
-    to also surface the FlavorNotes that method highlights — giving a complete
-    brewing + flavour profile in just two tool calls.
-
-    Args:
-        brew_method_name: Name of the brew method (e.g. "Espresso", "V60",
-                          "French Press", "Chemex", "AeroPress", "Cold Brew").
-    """
+def _get_brewing_rules_for_method(brew_method_name: str) -> str:
     try:
         candidates = supabase.table("knowledge_nodes").select("id, name").eq("node_type", "BrewMethod").ilike("name", f"%{brew_method_name}%").execute().data
         if not candidates:
             return f"No BrewMethod found matching '{brew_method_name}'."
         if len(candidates) > 1:
             return f"Multiple methods match '{brew_method_name}': {', '.join(c['name'] for c in candidates)}. Be more specific."
-
         method = candidates[0]
-
         inbound = supabase.table("knowledge_edges").select("source_id").eq("target_id", method["id"]).eq("relationship_type", "APPLIES_TO").execute().data
         if not inbound:
             return f"No BrewingRules found that apply to '{method['name']}'."
-
         rule_ids = [e["source_id"] for e in inbound]
         rules = supabase.table("knowledge_nodes").select("name, properties").eq("node_type", "BrewingRule").in_("id", rule_ids).execute().data
-
         lines = [f"BrewingRules for {method['name']} ({len(rules)} rule(s)):\n"]
         for rule in rules:
             p = rule["properties"]
@@ -576,9 +280,9 @@ def get_brewing_rules_for_method(brew_method_name: str) -> str:
             lines.append(f"  ── {rule['name']} ──")
             lines.append(f"  {p.get('description','')}")
             lines.append(f"  Dictates : {d.get('parameter','')} → {d.get('direction','')} to {d.get('value_range','')} {d.get('unit','')}")
-            lines.append(f"  PID required    : {pid.get('requires_pid','?')}")
+            lines.append(f"  PID required     : {pid.get('requires_pid','?')}")
             if pid.get("requires_pid"):
-                lines.append(f"  Reason          : {pid.get('reason','')}")
+                lines.append(f"  Reason           : {pid.get('reason','')}")
             lines.append(f"  No-PID workaround: {pid.get('non_pid_alternative','')}")
             lines.append(f"  Confidence: {p.get('confidence','?')}  |  Source: {p.get('evidence','?')}")
             lines.append("")
@@ -587,53 +291,15 @@ def get_brewing_rules_for_method(brew_method_name: str) -> str:
         return f"Error retrieving brewing rules for '{brew_method_name}': {str(e)}"
 
 
-@mcp.tool()
-def find_paths(start_node: str, end_node: str, max_hops: int = 3) -> str:
-    """
-    MULTI-HOP PATH FINDING — Discovers how two nodes are connected across the
-    knowledge graph, even with no direct edge. Uses BFS over the full graph
-    (loaded in-memory — 60 nodes, 89 edges) to find all shortest paths up to
-    max_hops steps, returning the complete chain of nodes and relationships.
-
-    This is the most powerful reasoning tool in the suite. It lets the LLM
-    construct an explicit, evidence-grounded reasoning chain to explain *why*
-    two concepts are related — beyond shallow 1-hop lookups.
-
-    WHEN TO USE:
-    - "Why would Ethiopian Natural pair well with French Press?" →
-        find_paths("Ethiopia", "French Press")
-    - "How does a Conical Burr Grinder relate to Dark Chocolate flavour?" →
-        find_paths("Conical Burr Grinder", "Dark Chocolate")
-    - When cross_reference_nodes() finds no shared neighbours and you need
-      to search deeper than 1 hop.
-    - Any time the user asks "why" or "how" two coffee concepts relate.
-
-    RETURNS: Up to 5 shortest paths, each showing the full node-and-edge chain:
-      [Origin] Ethiopia → TYPICAL_FLAVOR → [FlavorNote] Blueberry
-                        → PRODUCES_FLAVOR ← [ProcessMethod] Natural
-                        ...
-
-    Traversal is bidirectional (edges followed in both directions) so the path
-    can cross any relationship type in either direction.
-
-    PERFORMANCE: max_hops above 4 is rarely needed and is capped at 4.
-    The default of 3 covers virtually all meaningful connections in this graph.
-
-    Args:
-        start_node: Name of the starting node (exact or approximate).
-        end_node:   Name of the destination node (exact or approximate).
-        max_hops:   Maximum edges to traverse. Default 3, capped at 4.
-    """
+def _find_paths(start_node: str, end_node: str, max_hops: int = 3) -> str:
     try:
         from collections import deque
         max_hops = min(int(max_hops), 4)
-
         def resolve_one(name):
             r = supabase.table("knowledge_nodes").select("id, node_type, name").eq("name", name).execute().data
             if not r:
                 r = supabase.table("knowledge_nodes").select("id, node_type, name").ilike("name", f"%{name}%").execute().data
             return r
-
         starts, ends = resolve_one(start_node), resolve_one(end_node)
         if not starts:
             return f"Start node '{start_node}' not found."
@@ -643,27 +309,18 @@ def find_paths(start_node: str, end_node: str, max_hops: int = 3) -> str:
             return f"'{start_node}' is ambiguous: {', '.join(n['name'] for n in starts)}."
         if len(ends) > 1:
             return f"'{end_node}' is ambiguous: {', '.join(n['name'] for n in ends)}."
-
         start, end = starts[0], ends[0]
         if start["id"] == end["id"]:
             return f"Start and end are the same node: {start['name']}."
-
-        # Load full graph into memory
         node_info = {n["id"]: n for n in supabase.table("knowledge_nodes").select("id, node_type, name").execute().data}
         all_edges  = supabase.table("knowledge_edges").select("source_id, target_id, relationship_type").execute().data
-
-        # Bidirectional adjacency: id → [(neighbour_id, display_label)]
         adj: dict[str, list] = {nid: [] for nid in node_info}
         for e in all_edges:
             s, t, r = e["source_id"], e["target_id"], e["relationship_type"]
             adj[s].append((t, f"→{r}→"))
             adj[t].append((s, f"←{r}←"))
-
-        # BFS — each queue entry: (current_id, path)
-        # path = [(node_id, edge_label_used_to_arrive_here), ...]
         queue = deque([(start["id"], [(start["id"], "")])])
         found: list = []
-
         while queue and len(found) < 5:
             current_id, path = queue.popleft()
             if len(path) - 1 >= max_hops:
@@ -679,18 +336,10 @@ def find_paths(start_node: str, end_node: str, max_hops: int = 3) -> str:
                         break
                 else:
                     queue.append((nb_id, new_path))
-
         if not found:
             return (f"No path found between '{start['name']}' and '{end['name']}' "
-                    f"within {max_hops} hops.\n"
-                    f"Try increasing max_hops, or use cross_reference_nodes() "
-                    f"to inspect 1-hop shared neighbours.")
-
-        lines = [
-            f"Paths: [{start['node_type']}] {start['name']} → ... → "
-            f"[{end['node_type']}] {end['name']}  "
-            f"({len(found)} path(s), max_hops={max_hops})\n"
-        ]
+                    f"within {max_hops} hops.")
+        lines = [f"Paths: [{start['node_type']}] {start['name']} → ... → [{end['node_type']}] {end['name']}  ({len(found)} path(s))\n"]
         for i, path in enumerate(found, 1):
             lines.append(f"  Path {i} ({len(path)-1} hop(s)):")
             for j, (nid, label) in enumerate(path):
@@ -707,107 +356,38 @@ def find_paths(start_node: str, end_node: str, max_hops: int = 3) -> str:
         return f"Error finding paths between '{start_node}' and '{end_node}': {str(e)}"
 
 
-@mcp.tool()
-def semantic_search(query: str, match_count: int = 3) -> str:
-    """
-    SEMANTIC SEARCH — The ultimate fallback tool when you don't know the exact
-    node name, relationship type, or even the right category to search in.
-
-    Unlike search_nodes() (which does a text substring match on node names),
-    semantic_search() encodes the *meaning* of the query into a 1536-dimension
-    vector and finds the knowledge graph nodes whose stored embeddings are most
-    semantically similar — regardless of exact wording.
-
-    WHEN TO USE THIS TOOL:
-    - Abstract or emotional queries: "something for cold mornings", "cozy",
-      "bright and energising", "smooth and low-acid" — these have no exact
-      graph node but map strongly to certain origins, roast levels, or methods.
-    - Flavour-first queries: "sour", "fruity", "jammy", "stone fruit" — the
-      user is describing a taste experience, not a node name.
-    - Concept bridging: "What coffee suits a beginner with no fancy equipment?"
-      — the answer lives across BrewMethod, EquipmentType, and BrewingRule
-      nodes whose embeddings capture that context.
-    - When search_nodes() returns nothing useful and you need a broader net.
-    - When the user's phrasing is colloquial or imprecise ("Ethiopian-ish",
-      "something like V60 but easier").
-
-    HOW IT WORKS:
-    Calls the Supabase `match_knowledge_nodes` RPC (pgvector cosine similarity)
-    with a match_threshold of 0.2. Results are ranked by similarity score
-    (1.0 = identical meaning, 0.0 = unrelated). Scores above 0.5 are strong
-    matches; 0.3-0.5 are plausible associations worth investigating.
-
-    MULTI-HOP PATTERN:
-    1. semantic_search("fruity and floral light roast") → surfaces "Ethiopia",
-       "Jasmine", "Light" as top hits.
-    2. get_node_connections("Ethiopia") → explore exact graph relationships.
-    3. get_brewing_rules_for_method("V60") → ground the advice in brewing rules.
-
-    RETURNS: Up to `match_count` nodes ranked by semantic similarity, each with
-    node_type, name, similarity score, and a properties snippet so you can
-    immediately judge relevance and decide which graph tools to call next.
-
-    Args:
-        query:       Natural-language description of what you're looking for.
-                     Can be a flavour profile, brewing scenario, or abstract concept.
-        match_count: Maximum number of results to return (default 3, max sensible
-                     value is ~10 — more results dilute relevance quickly).
-    """
+def _semantic_search(query: str, match_count: int = 5) -> str:
     try:
-        # 1. Embed the query
         response = openai_client.embeddings.create(
             input=query.strip().replace("\n", " "),
             model="text-embedding-3-small",
         )
         embedding = response.data[0].embedding
-
-        # 2. Call the pgvector RPC
         rpc_resp = supabase.rpc(
             "match_knowledge_nodes",
-            {
-                "query_embedding": embedding,
-                "match_threshold":  0.2,
-                "match_count":      match_count,
-            },
+            {"query_embedding": embedding, "match_threshold": 0.2, "match_count": match_count},
         ).execute()
-
         results = rpc_resp.data
         if not results:
-            return (
-                f"No semantic matches found for query: '{query}'.\n"
-                f"Try rephrasing, or use search_nodes() for an exact keyword lookup."
-            )
-
-        lines = [f"Semantic search for '{query}' — {len(results)} match(es):\n"]
+            return f"No semantic matches found for: '{query}'."
+        lines = [f"Semantic search '{query}' — {len(results)} match(es):\n"]
         for i, row in enumerate(results, 1):
             similarity = row.get("similarity", 0)
             props = row.get("properties") or {}
-
-            # Build a short properties snippet (first 3 key-value pairs)
             snippet_parts = []
             for k, v in list(props.items())[:3]:
-                if isinstance(v, list):
-                    snippet_parts.append(f"{k}: {', '.join(str(x) for x in v)}")
-                else:
-                    snippet_parts.append(f"{k}: {v}")
+                snippet_parts.append(f"{k}: {', '.join(str(x) for x in v) if isinstance(v, list) else v}")
             snippet = " | ".join(snippet_parts) if snippet_parts else "(no properties)"
-
             lines.append(f"  {i}. [{row.get('node_type','?')}] {row.get('name','?')}")
             lines.append(f"     similarity : {similarity:.4f}")
             lines.append(f"     properties : {snippet}")
             lines.append("")
-
         return "\n".join(lines)
-
     except Exception as e:
         return f"Error during semantic search: {str(e)}"
 
 
-# ---------------------------------------------------------------------------
-# UNIFIED SEARCH — ORCHESTRATOR
-# Private helpers below are plain Python functions, not MCP tools.
-# They return raw data structures so unified_search can synthesize them.
-# ---------------------------------------------------------------------------
+# --- Vector + graph enrichment helpers (unchanged) ---------------------------
 
 def _embed(text: str) -> list[float]:
     response = openai_client.embeddings.create(
@@ -827,220 +407,422 @@ def _vector_search_raw(embedding: list[float], threshold: float = 0.2, count: in
 
 
 def _extract_mentioned_nodes(query: str) -> list[dict]:
-    """
-    Scan every node name in the graph against the query string.
-    Case-insensitive substring match — handles "Ethiopian" → "Ethiopia",
-    "french press" → "French Press", etc. because the node name is a
-    substring of the user's word.
-    """
-    all_nodes = supabase.table("knowledge_nodes")\
-        .select("id, node_type, name, properties")\
-        .execute().data
+    all_nodes = supabase.table("knowledge_nodes").select("id, node_type, name, properties").execute().data
     q = query.lower()
     return [n for n in all_nodes if n["name"].lower() in q]
 
 
 def _enrich_node(node: dict, similarity: float | None = None) -> str:
-    """
-    Build a rich context block for a single node:
-      • Top 4 properties
-      • Up to 5 outbound and 3 inbound 1-hop graph connections
-
-    Makes 3 DB queries per call; keep enriched nodes ≤ 3 per unified_search
-    invocation to stay performant.
-    """
     sim_tag = f"  (similarity: {similarity:.4f})" if similarity is not None else ""
     lines = [f"  [{node.get('node_type','?')}] {node.get('name','?')}{sim_tag}"]
-
-    # Properties snippet
     props = node.get("properties") or {}
     for k, v in list(props.items())[:4]:
         val = ", ".join(str(x) for x in v) if isinstance(v, list) else str(v)
         lines.append(f"    {k}: {val}")
-
-    # 1-hop graph connections
     node_id = node.get("id")
     if not node_id:
         return "\n".join(lines)
-
-    out_edges = supabase.table("knowledge_edges")\
-        .select("target_id, relationship_type, properties")\
-        .eq("source_id", node_id).execute().data
-    in_edges = supabase.table("knowledge_edges")\
-        .select("source_id, relationship_type, properties")\
-        .eq("target_id", node_id).execute().data
-
+    out_edges = supabase.table("knowledge_edges").select("target_id, relationship_type, properties").eq("source_id", node_id).execute().data
+    in_edges  = supabase.table("knowledge_edges").select("source_id, relationship_type, properties").eq("target_id", node_id).execute().data
     nb_ids = [e["target_id"] for e in out_edges] + [e["source_id"] for e in in_edges]
     if nb_ids:
-        nb_map = {n["id"]: n for n in supabase.table("knowledge_nodes")
-                  .select("id, node_type, name").in_("id", nb_ids).execute().data}
-
+        nb_map = {n["id"]: n for n in supabase.table("knowledge_nodes").select("id, node_type, name").in_("id", nb_ids).execute().data}
         if out_edges:
             lines.append("    Connects to:")
             for e in out_edges[:5]:
                 nb = nb_map.get(e["target_id"], {})
                 conf = e["properties"].get("confidence", "?")
-                lines.append(f"      → {e['relationship_type']} → "
-                             f"[{nb.get('node_type','?')}] {nb.get('name','?')}  (conf: {conf})")
+                lines.append(f"      → {e['relationship_type']} → [{nb.get('node_type','?')}] {nb.get('name','?')}  (conf: {conf})")
         if in_edges:
             lines.append("    Referenced by:")
             for e in in_edges[:3]:
                 nb = nb_map.get(e["source_id"], {})
-                lines.append(f"      ← {e['relationship_type']} ← "
-                             f"[{nb.get('node_type','?')}] {nb.get('name','?')}")
-
+                lines.append(f"      ← {e['relationship_type']} ← [{nb.get('node_type','?')}] {nb.get('name','?')}")
     return "\n".join(lines)
 
 
-@mcp.tool()
-def unified_search(query: str) -> str:
+# --- Orchestration helpers (new) ---------------------------------------------
+
+def _unified_search(query: str) -> str:
+    """Entity extraction + vector search + graph enrichment. Returns formatted string."""
+    sections: list[str] = []
+    seen_ids: set[str] = set()
+
+    mentioned   = _extract_mentioned_nodes(query)
+    embedding   = _embed(query)
+    vector_hits = _vector_search_raw(embedding, threshold=0.2, count=5)
+    high_conf   = [r for r in vector_hits if (r.get("similarity") or 0) >= 0.6]
+    low_conf    = [r for r in vector_hits if 0.2 <= (r.get("similarity") or 0) < 0.6]
+
+    sections.append(
+        f"  {len(mentioned)} entity mention(s)  |  "
+        f"{len(vector_hits)} vector hit(s)  |  "
+        f"{len(high_conf)} high-confidence (≥ 0.6)"
+    )
+
+    enrich_budget = 3
+
+    if mentioned:
+        sections.append("── IDENTIFIED ENTITIES ──")
+        for node in mentioned[:enrich_budget]:
+            if node["id"] not in seen_ids:
+                seen_ids.add(node["id"])
+                sections.append(_enrich_node(node))
+                sections.append("")
+                enrich_budget -= 1
+
+    if high_conf and enrich_budget > 0:
+        sections.append("── HIGH-CONFIDENCE SEMANTIC MATCHES (similarity ≥ 0.6) ──")
+        for r in high_conf:
+            if enrich_budget <= 0:
+                break
+            r_id = r.get("id")
+            if r_id and r_id not in seen_ids:
+                seen_ids.add(r_id)
+                sections.append(_enrich_node(r, similarity=r.get("similarity")))
+                sections.append("")
+                enrich_budget -= 1
+
+    remaining = [r for r in low_conf if r.get("id") not in seen_ids]
+    if remaining:
+        sections.append("── SUPPORTING CONTEXT (similarity 0.2–0.6) ──")
+        for r in remaining[:3]:
+            props = r.get("properties") or {}
+            snippet = "  |  ".join(
+                f"{k}: {', '.join(str(x) for x in v) if isinstance(v, list) else v}"
+                for k, v in list(props.items())[:2]
+            )
+            sections.append(f"  [{r.get('node_type','?')}] {r.get('name','?')}  (similarity: {r.get('similarity', 0):.4f})")
+            if snippet:
+                sections.append(f"  {snippet}")
+            sections.append("")
+
+    return "\n".join(sections) if sections else "No results found."
+
+
+def _get_user_context() -> str:
     """
-    UNIFIED SEARCH ORCHESTRATOR — This is the ONLY tool you need to call for
-    the vast majority of user queries. It combines vector-semantic lookup with
-    structured graph traversal and returns a single, context-rich response.
-
-    DO NOT call semantic_search(), search_nodes(), or get_node_connections()
-    manually before calling this tool — unified_search runs all of them
-    internally and synthesises the results intelligently.
-
-    INTERNAL PIPELINE:
-    1. ENTITY EXTRACTION — scans every node name in the graph against the
-       raw query string (case-insensitive substring match). Any node whose
-       name appears in the query is flagged as an "identified entity" and
-       given top priority in the response.
-    2. SEMANTIC VECTOR SEARCH — embeds the query with text-embedding-3-small
-       and calls the pgvector `match_knowledge_nodes` RPC. Results are
-       bucketed by confidence:
-         • HIGH (similarity ≥ 0.6): treated as strong semantic matches,
-           enriched with full graph connections.
-         • SUPPORTING (0.2–0.6): shown as additional context without full
-           graph enrichment.
-    3. CONTEXT ENRICHMENT — for every node in the top tier (identified
-       entities + high-confidence hits, up to 3 total), fetches its
-       1-hop graph neighbourhood: outbound relationships and inbound
-       references with confidence scores. This gives the LLM a full
-       "node profile" rather than a dry snippet.
-    4. DEDUPLICATION — each node appears at most once across all sections,
-       regardless of how many pipelines surface it.
-
-    SYNTHESIS LOGIC:
-    - Explicitly mentioned nodes always appear first (they are ground truth).
-    - High-similarity vector matches are surfaced next; if they overlap with
-      mentioned nodes, the graph enrichment is shared.
-    - If both pipelines return nothing, the tool says so clearly rather than
-      hallucinating an answer.
-
-    WHEN TO USE:
-    - Any natural-language question about coffee: brewing, origins, flavours,
-      equipment, pairings, techniques.
-    - Vague / emotional queries: "something for cold mornings", "cozy",
-      "bright and energising" — vector search handles these.
-    - Specific node queries: "How does V60 work?", "Tell me about Ethiopia" —
-      entity extraction pins the exact graph node.
-    - Mixed queries: "How do I brew light roast coffee?" — extracts
-      "Light Roast" as an entity AND finds semantically similar brewing nodes.
-
-    WHEN TO USE A DIFFERENT TOOL INSTEAD:
-    - You need to trace a multi-hop path between two specific nodes →
-      find_paths().
-    - You need all nodes of one type for an inventory → get_nodes_by_type().
-    - You need full structured BrewingRule JSONB for advice grounding →
-      get_brewing_rules_for_method().
-
-    RETURNS: A structured, ranked response with three sections:
-      1. Identified Entities — exact node matches with full graph context.
-      2. High-Confidence Semantic Matches — strong vector hits with graph context.
-      3. Supporting Context — lower-confidence vector results for reference.
-
-    Args:
-        query: Any natural-language question or concept. Can be a full sentence,
-               a flavour description, a brewing scenario, or a node name.
+    Derive a user profile from existing shots and beans data.
+    Returns a formatted summary block prepended to every ask() response.
     """
     try:
-        sections: list[str] = []
-        seen_ids: set[str] = set()
+        shots = supabase.table("shots").select(
+            "brew_method, overall_score, created_at"
+        ).order("created_at", desc=True).limit(30).execute().data
 
-        # ── Step 1: Entity extraction ─────────────────────────────────────────
-        mentioned = _extract_mentioned_nodes(query)
+        active_beans = supabase.table("beans").select(
+            "roaster, origin, roast_date"
+        ).eq("is_active", True).execute().data
 
-        # ── Step 2: Semantic vector search ───────────────────────────────────
-        embedding   = _embed(query)
-        vector_hits = _vector_search_raw(embedding, threshold=0.2, count=5)
+        lines = ["── YOUR CONTEXT ──"]
 
-        high_conf = [r for r in vector_hits if (r.get("similarity") or 0) >= 0.6]
-        low_conf  = [r for r in vector_hits if 0.2 <= (r.get("similarity") or 0) < 0.6]
+        # Active bean
+        if active_beans:
+            b = active_beans[0]
+            lines.append(f"  Active bean    : {b.get('roaster','')} — {b.get('origin','')}  (roasted: {b.get('roast_date','')})")
+        else:
+            lines.append("  Active bean    : None set")
 
-        # ── Header ───────────────────────────────────────────────────────────
-        sections.append(
-            f"Unified search: '{query}'\n"
-            f"  {len(mentioned)} entity mention(s)  |  "
-            f"{len(vector_hits)} vector hit(s)  |  "
-            f"{len(high_conf)} high-confidence (≥ 0.6)\n"
-        )
+        if not shots:
+            lines.append("  Shot history   : None yet — log your first shot with log_shot()")
+            return "\n".join(lines)
 
-        # ── Step 3 & 4: Enrich top nodes (cap at 3 total to stay performant) ─
-        enrich_budget = 3
+        method_counts: Counter = Counter(s.get("brew_method") for s in shots if s.get("brew_method"))
+        method_scores: dict[str, list[float]] = {}
+        for s in shots:
+            m  = s.get("brew_method")
+            sc = s.get("overall_score")
+            if m and sc is not None:
+                method_scores.setdefault(m, []).append(float(sc))
 
-        if mentioned:
-            sections.append("── IDENTIFIED ENTITIES (explicitly mentioned in query) ──")
-            for node in mentioned[:enrich_budget]:
-                if node["id"] not in seen_ids:
-                    seen_ids.add(node["id"])
-                    sections.append(_enrich_node(node))
-                    sections.append("")
-                    enrich_budget -= 1
+        top_method  = method_counts.most_common(1)[0][0] if method_counts else "unknown"
+        avg_scores  = {m: sum(v) / len(v) for m, v in method_scores.items()}
+        best_method = max(avg_scores, key=avg_scores.get) if avg_scores else "unknown"
+        overall_avg = sum(avg_scores.values()) / len(avg_scores) if avg_scores else 0.0
 
-        if high_conf and enrich_budget > 0:
-            sections.append("── HIGH-CONFIDENCE SEMANTIC MATCHES (similarity ≥ 0.6) ──")
-            for r in high_conf:
-                if enrich_budget <= 0:
-                    break
-                r_id = r.get("id")
-                if r_id and r_id not in seen_ids:
-                    seen_ids.add(r_id)
-                    sections.append(_enrich_node(r, similarity=r.get("similarity")))
-                    sections.append("")
-                    enrich_budget -= 1
+        lines.append(f"  Most used      : {top_method} ({method_counts.get(top_method, 0)} shots)")
+        lines.append(f"  Best scoring   : {best_method} (avg {avg_scores.get(best_method, 0):.1f}/10)")
+        lines.append(f"  Overall avg    : {overall_avg:.1f}/10  across {len(shots)} recent shots")
 
-        # ── Step 5: Supporting context — lighter treatment ────────────────────
-        remaining = [r for r in low_conf if r.get("id") not in seen_ids]
-        if remaining:
-            sections.append("── SUPPORTING CONTEXT (similarity 0.2–0.6) ──")
-            for r in remaining[:3]:
-                props = r.get("properties") or {}
-                snippet = "  |  ".join(
-                    f"{k}: {', '.join(str(x) for x in v) if isinstance(v, list) else v}"
-                    for k, v in list(props.items())[:2]
-                )
-                sections.append(
-                    f"  [{r.get('node_type','?')}] {r.get('name','?')}  "
-                    f"(similarity: {r.get('similarity', 0):.4f})"
-                )
-                if snippet:
-                    sections.append(f"  {snippet}")
-                sections.append("")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"── YOUR CONTEXT ──\n  (unavailable: {str(e)})"
 
-        # ── Fallback ─────────────────────────────────────────────────────────
-        if len(sections) <= 1:
-            return (
-                f"No results found for: '{query}'.\n"
-                "Try rephrasing, or call search_nodes() for an exact keyword lookup."
-            )
 
-        return "\n".join(sections)
+def _classify_intent(query: str) -> str:
+    """
+    Keyword-based intent classification.
+    Returns one of: 'recommendation' | 'brewing' | 'knowledge'
+    """
+    q = query.lower()
+    if any(w in q for w in [
+        "recommend", "suggest", "best", "which bean", "what bean",
+        "worth", "value", "vfm", "try next", "should i buy", "what should i try",
+    ]):
+        return "recommendation"
+    if any(w in q for w in [
+        "how", "brew", "make", "grind", "temperature", "temp",
+        "ratio", "dose", "pour", "steep", "extract", "pull", "shot",
+        "recipe", "technique", "prepare",
+    ]):
+        return "brewing"
+    return "knowledge"
+
+
+# =============================================================================
+# PUBLIC MCP TOOLS — the 4-tool semantic layer surface
+# =============================================================================
+
+@mcp.tool()
+def seed_knowledge_graph() -> str:
+    """
+    ADMIN — Seeds the knowledge_nodes and knowledge_edges Supabase tables with
+    the full static coffee domain knowledge graph (60 nodes, 89 edges).
+    Uses upsert — safe to re-run without creating duplicates.
+    Requires SUPABASE_KEY to be set to the service role key.
+    """
+    try:
+        from knowledge_graph import NODES, EDGE_DEFINITIONS
+        nodes_res = supabase.table("knowledge_nodes").upsert(NODES, on_conflict="node_type,name").execute()
+        node_count = len(nodes_res.data)
+        all_nodes_res = supabase.table("knowledge_nodes").select("id, node_type, name").execute()
+        node_id_map = {(n["node_type"], n["name"]): n["id"] for n in all_nodes_res.data}
+        edges = []
+        skipped_edges = []
+        for edge_def in EDGE_DEFINITIONS:
+            src_id = node_id_map.get(edge_def["source"])
+            tgt_id = node_id_map.get(edge_def["target"])
+            if src_id is None or tgt_id is None:
+                skipped_edges.append(f"{edge_def['source']} -> {edge_def['target']}")
+                continue
+            edges.append({
+                "source_id": src_id,
+                "target_id": tgt_id,
+                "relationship_type": edge_def["relationship"],
+                "properties": edge_def["properties"],
+            })
+        edges_res = supabase.table("knowledge_edges").upsert(edges, on_conflict="source_id,target_id,relationship_type").execute()
+        edge_count = len(edges_res.data)
+        summary = f"Knowledge graph seeded: {node_count} nodes, {edge_count} edges."
+        if skipped_edges:
+            summary += f"\nSkipped {len(skipped_edges)} edges: {', '.join(skipped_edges)}"
+        return summary
+    except Exception as e:
+        return f"Error seeding knowledge graph: {str(e)}"
+
+
+@mcp.tool()
+def ask(query: str) -> str:
+    """
+    PRIMARY ENTRY POINT — Use this for every coffee question. It is the only
+    tool you need to call for knowledge queries, brewing advice, and general
+    exploration of the coffee graph.
+
+    Internally it runs three pipelines and synthesises the results:
+
+    1. USER CONTEXT — Fetches the user's shot history and active bean to
+       personalise every response. Their most-used brew method, best-scoring
+       method, and overall average score are prepended automatically.
+
+    2. INTENT CLASSIFICATION — Keyword analysis determines which enrichment
+       layer to activate on top of the base retrieval:
+         • "brewing" intent  → also fetches BrewingRules (grind, temp, ratio,
+           PID requirements, no-PID workarounds) for any brew method mentioned.
+         • "recommendation" intent → also runs the VFM analysis across all
+           beans the user has logged shots against.
+         • "knowledge" intent (default) → base retrieval only.
+
+    3. UNIFIED RETRIEVAL — Runs entity extraction (every graph node name
+       checked against the query) plus pgvector semantic search, then enriches
+       the top results with their 1-hop graph connections. High-confidence
+       semantic hits (similarity ≥ 0.6) get full graph profiles; lower-
+       confidence hits appear as supporting context.
+
+    WHEN TO USE A DIFFERENT TOOL INSTEAD:
+    - Logging a new shot           → log_shot()
+    - Getting personalised picks   → get_recommendations() (more detailed than ask)
+    - Re-seeding the graph         → seed_knowledge_graph() (admin only)
+
+    Args:
+        query: Any natural-language coffee question. Full sentences, keywords,
+               flavour descriptions, and abstract concepts all work.
+    """
+    try:
+        parts: list[str] = []
+
+        # 1. User context — always first
+        parts.append(_get_user_context())
+
+        # 2. Classify intent
+        intent = _classify_intent(query)
+
+        # 3. Unified retrieval (entity + vector + graph enrichment)
+        retrieval = _unified_search(query)
+        parts.append(f"── KNOWLEDGE RETRIEVAL ──\n{retrieval}")
+
+        # 4. Intent-specific enrichment
+        if intent == "brewing":
+            brew_methods = [n for n in _extract_mentioned_nodes(query) if n["node_type"] == "BrewMethod"]
+            if brew_methods:
+                rules_block = "\n\n".join(_get_brewing_rules_for_method(m["name"]) for m in brew_methods[:2])
+                parts.append(f"── BREWING RULES ──\n{rules_block}")
+
+        elif intent == "recommendation":
+            parts.append(f"── VALUE FOR MONEY ANALYSIS ──\n{_analyze_best_value_coffees()}")
+
+        return "\n\n".join(p for p in parts if p.strip())
 
     except Exception as e:
-        return f"Error in unified_search: {str(e)}"
+        return f"Error in ask: {str(e)}"
 
 
-# ---------------------------------------------------------------------------
-# ASGI app — used by uvicorn for cloud / SSE deployment:
-#   uvicorn server:app --host 0.0.0.0 --port 8000
-#
-# All MCP tools are registered on `mcp` by this point in the file, so the
-# SSE app picks them up correctly.  The stdio entrypoint (`python server.py`)
-# is preserved by the __main__ guard above.
-# ---------------------------------------------------------------------------
+@mcp.tool()
+def log_shot(
+    brew_method: str,
+    dose: float,
+    yield_g: float,
+    extraction_time: int,
+    overall_score: int,
+    brew_temp: float = 93.0,
+    grind_setting: str = "",
+    has_milk: bool = False,
+    bean_id: str = "",
+) -> str:
+    """
+    LOG A SHOT — Record a new coffee shot to the database. Call this whenever
+    the user says they just made a coffee, pulled a shot, or wants to track
+    a brew.
+
+    After inserting the shot, returns a graph-grounded insight comparing the
+    user's parameters against the knowledge graph's BrewingRules for their
+    chosen method (e.g. whether extraction time is within the optimal window).
+
+    Args:
+        brew_method:      Brew method used. Common values: "Espresso", "V60",
+                          "French Press", "Chemex", "AeroPress", "Cold Brew".
+        dose:             Coffee dose in grams (e.g. 18.0).
+        yield_g:          Liquid yield in grams (e.g. 36.0).
+        extraction_time:  Total brew time in seconds (e.g. 28).
+        overall_score:    Your score for this shot, 1–10.
+        brew_temp:        Water temperature in °C (default 93.0).
+        grind_setting:    Grinder setting used, as a string (e.g. "12", "3.5").
+        has_milk:         True if milk or alternative was added (default False).
+        bean_id:          UUID of the bean used. Leave empty if unknown.
+    """
+    try:
+        if not 1 <= overall_score <= 10:
+            return f"Score must be between 1 and 10. Received: {overall_score}"
+
+        payload: dict = {
+            "brew_method":     brew_method,
+            "dose":            dose,
+            "yield":           yield_g,
+            "extraction_time": extraction_time,
+            "overall_score":   overall_score,
+            "brew_temp":       brew_temp,
+            "has_milk":        has_milk,
+        }
+        if grind_setting:
+            payload["grind_setting"] = grind_setting
+        if bean_id:
+            payload["bean_id"] = bean_id
+
+        resp = supabase.table("shots").insert(payload).execute()
+        if not resp.data:
+            return "Shot insert returned no data. Check Supabase logs."
+
+        shot = resp.data[0]
+        lines = [f"Shot logged. ID: {shot.get('id')}"]
+        lines.append(f"  {brew_method} | {dose}g → {yield_g}g | {extraction_time}s | {overall_score}/10")
+
+        # Graph-grounded feedback
+        brew_ratio = round(yield_g / dose, 2) if dose > 0 else 0
+        if brew_method == "Espresso":
+            if extraction_time < 25:
+                lines.append("Graph insight: Shot ran fast (<25s). Grind finer or increase dose to slow extraction.")
+            elif extraction_time > 35:
+                lines.append("Graph insight: Shot ran slow (>35s). Grind coarser or reduce dose.")
+            else:
+                lines.append("Graph insight: Extraction time within optimal 25-35s window.")
+            if brew_ratio < 1.8:
+                lines.append(f"Graph insight: Ratio {brew_ratio:.2f} is below the 1:2 target — consider pulling longer.")
+            elif brew_ratio > 2.5:
+                lines.append(f"Graph insight: Ratio {brew_ratio:.2f} is above 1:2.5 — shot may be dilute.")
+        elif brew_method in ("V60", "Chemex"):
+            if not (15 <= brew_ratio <= 17):
+                lines.append(f"Graph insight: Ratio {brew_ratio:.2f} is outside the Golden Ratio window of 1:15-1:17.")
+            else:
+                lines.append(f"Graph insight: Ratio {brew_ratio:.2f} is within the Golden Ratio range.")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"Error logging shot: {str(e)}"
+
+
+@mcp.tool()
+def get_recommendations() -> str:
+    """
+    PERSONALISED RECOMMENDATIONS — Get tailored coffee suggestions grounded
+    in both the user's shot history and the knowledge graph.
+
+    Call this when the user asks what they should try next, which bean offers
+    the best value, or wants a data-driven suggestion based on their brewing
+    history.
+
+    Returns three layers of insight:
+    1. USER CONTEXT — current active bean and derived preferences.
+    2. VFM ANALYSIS — value-for-money ranking across all beans the user has
+       shot against, with average scores, price-per-100g, and best method.
+    3. GRAPH PAIRINGS — Origins that the knowledge graph recommends for the
+       user's most-used brew method (via PAIRS_WITH edges), so suggestions
+       are grounded in structured coffee science rather than generic advice.
+    """
+    try:
+        parts: list[str] = []
+
+        # 1. User context
+        parts.append(_get_user_context())
+
+        # 2. VFM analysis
+        parts.append(f"── VALUE FOR MONEY ANALYSIS ──\n{_analyze_best_value_coffees()}")
+
+        # 3. Graph-grounded origin pairings for top method
+        shots = supabase.table("shots").select("brew_method").order("created_at", desc=True).limit(30).execute().data
+        if shots:
+            method_counts: Counter = Counter(s.get("brew_method") for s in shots if s.get("brew_method"))
+            top_method = method_counts.most_common(1)[0][0] if method_counts else None
+
+            if top_method:
+                method_node = supabase.table("knowledge_nodes").select("id, name").eq("node_type", "BrewMethod").eq("name", top_method).execute().data
+                if method_node:
+                    method_id = method_node[0]["id"]
+                    pairs_edges = supabase.table("knowledge_edges").select("source_id").eq("target_id", method_id).eq("relationship_type", "PAIRS_WITH").execute().data
+                    if pairs_edges:
+                        origin_ids = [e["source_id"] for e in pairs_edges]
+                        origins = supabase.table("knowledge_nodes").select("name, properties").in_("id", origin_ids).eq("node_type", "Origin").execute().data
+                        if origins:
+                            lines = [f"── ORIGINS THAT PAIR WELL WITH {top_method.upper()} (from knowledge graph) ──"]
+                            for o in origins:
+                                p = o["properties"]
+                                lines.append(f"  • {o['name']}")
+                                lines.append(f"    {p.get('cup_profile','')}")
+                                lines.append(f"    Common processes: {', '.join(p.get('common_processes', []))}")
+                            parts.append("\n".join(lines))
+
+        return "\n\n".join(p for p in parts if p.strip())
+
+    except Exception as e:
+        return f"Error getting recommendations: {str(e)}"
+
+
+# =============================================================================
+# ASGI app — uvicorn server:app --host 0.0.0.0 --port $PORT
+# =============================================================================
+
+if __name__ == "__main__":
+    mcp.run()
+
 app = FastAPI(title="Coffee Barista MCP Server")
 
 
@@ -1049,5 +831,4 @@ def health():
     return {"status": "ok", "server": "Coffee Barista MCP"}
 
 
-# Mount the MCP SSE transport — exposes GET /sse and POST /messages/
 app.mount("/", mcp.sse_app())
