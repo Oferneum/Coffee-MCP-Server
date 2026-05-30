@@ -1,6 +1,7 @@
 import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from openai import OpenAI
 from supabase import create_client, Client
 from mcp.server.fastmcp import FastMCP
 
@@ -11,6 +12,9 @@ load_dotenv()
 supabase_url: str = os.environ.get("SUPABASE_URL")
 supabase_key: str = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(supabase_url, supabase_key)
+
+# Initialize OpenAI client (OPENAI_API_KEY read from environment)
+openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 # Initialize the MCP server instance
 mcp = FastMCP("Coffee Barista MCP", host="0.0.0.0")
@@ -701,6 +705,102 @@ def find_paths(start_node: str, end_node: str, max_hops: int = 3) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"Error finding paths between '{start_node}' and '{end_node}': {str(e)}"
+
+
+@mcp.tool()
+def semantic_search(query: str, match_count: int = 3) -> str:
+    """
+    SEMANTIC SEARCH — The ultimate fallback tool when you don't know the exact
+    node name, relationship type, or even the right category to search in.
+
+    Unlike search_nodes() (which does a text substring match on node names),
+    semantic_search() encodes the *meaning* of the query into a 1536-dimension
+    vector and finds the knowledge graph nodes whose stored embeddings are most
+    semantically similar — regardless of exact wording.
+
+    WHEN TO USE THIS TOOL:
+    - Abstract or emotional queries: "something for cold mornings", "cozy",
+      "bright and energising", "smooth and low-acid" — these have no exact
+      graph node but map strongly to certain origins, roast levels, or methods.
+    - Flavour-first queries: "sour", "fruity", "jammy", "stone fruit" — the
+      user is describing a taste experience, not a node name.
+    - Concept bridging: "What coffee suits a beginner with no fancy equipment?"
+      — the answer lives across BrewMethod, EquipmentType, and BrewingRule
+      nodes whose embeddings capture that context.
+    - When search_nodes() returns nothing useful and you need a broader net.
+    - When the user's phrasing is colloquial or imprecise ("Ethiopian-ish",
+      "something like V60 but easier").
+
+    HOW IT WORKS:
+    Calls the Supabase `match_knowledge_nodes` RPC (pgvector cosine similarity)
+    with a match_threshold of 0.2. Results are ranked by similarity score
+    (1.0 = identical meaning, 0.0 = unrelated). Scores above 0.5 are strong
+    matches; 0.3-0.5 are plausible associations worth investigating.
+
+    MULTI-HOP PATTERN:
+    1. semantic_search("fruity and floral light roast") → surfaces "Ethiopia",
+       "Jasmine", "Light" as top hits.
+    2. get_node_connections("Ethiopia") → explore exact graph relationships.
+    3. get_brewing_rules_for_method("V60") → ground the advice in brewing rules.
+
+    RETURNS: Up to `match_count` nodes ranked by semantic similarity, each with
+    node_type, name, similarity score, and a properties snippet so you can
+    immediately judge relevance and decide which graph tools to call next.
+
+    Args:
+        query:       Natural-language description of what you're looking for.
+                     Can be a flavour profile, brewing scenario, or abstract concept.
+        match_count: Maximum number of results to return (default 3, max sensible
+                     value is ~10 — more results dilute relevance quickly).
+    """
+    try:
+        # 1. Embed the query
+        response = openai_client.embeddings.create(
+            input=query.strip().replace("\n", " "),
+            model="text-embedding-3-small",
+        )
+        embedding = response.data[0].embedding
+
+        # 2. Call the pgvector RPC
+        rpc_resp = supabase.rpc(
+            "match_knowledge_nodes",
+            {
+                "query_embedding": embedding,
+                "match_threshold":  0.2,
+                "match_count":      match_count,
+            },
+        ).execute()
+
+        results = rpc_resp.data
+        if not results:
+            return (
+                f"No semantic matches found for query: '{query}'.\n"
+                f"Try rephrasing, or use search_nodes() for an exact keyword lookup."
+            )
+
+        lines = [f"Semantic search for '{query}' — {len(results)} match(es):\n"]
+        for i, row in enumerate(results, 1):
+            similarity = row.get("similarity", 0)
+            props = row.get("properties") or {}
+
+            # Build a short properties snippet (first 3 key-value pairs)
+            snippet_parts = []
+            for k, v in list(props.items())[:3]:
+                if isinstance(v, list):
+                    snippet_parts.append(f"{k}: {', '.join(str(x) for x in v)}")
+                else:
+                    snippet_parts.append(f"{k}: {v}")
+            snippet = " | ".join(snippet_parts) if snippet_parts else "(no properties)"
+
+            lines.append(f"  {i}. [{row.get('node_type','?')}] {row.get('name','?')}")
+            lines.append(f"     similarity : {similarity:.4f}")
+            lines.append(f"     properties : {snippet}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"Error during semantic search: {str(e)}"
 
 
 # ---------------------------------------------------------------------------
