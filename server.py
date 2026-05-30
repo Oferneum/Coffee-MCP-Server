@@ -13,7 +13,7 @@ supabase_key: str = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(supabase_url, supabase_key)
 
 # Initialize the MCP server instance
-mcp = FastMCP("Coffee Barista MCP")
+mcp = FastMCP("Coffee Barista MCP", host="0.0.0.0")
 
 @mcp.tool()
 def get_recent_shots(limit: int = 5) -> str:
