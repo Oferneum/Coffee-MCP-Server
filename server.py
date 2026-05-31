@@ -1155,6 +1155,7 @@ def ask(query: str) -> str:
 
         # 2. Classify intent
         intent = _classify_intent(query)
+        print(f"DEBUG ask() | query={query!r} | intent={intent}")
 
         # 3. Unified retrieval (entity + vector + graph enrichment)
         retrieval = _unified_search(query)
@@ -1163,6 +1164,7 @@ def ask(query: str) -> str:
         # 4. Intent-specific enrichment
         if intent == "brewing":
             brew_methods = [n for n in _extract_mentioned_nodes(query) if n["node_type"] == "BrewMethod"]
+            print(f"DEBUG ask() | brewing | brew_methods={[m['name'] for m in brew_methods]}")
             if brew_methods:
                 # Named brew method: fetch its rules + diagnose the most recent
                 # shot made with that method.  This grounds the answer in the
@@ -1181,8 +1183,10 @@ def ask(query: str) -> str:
                     .execute()
                     .data
                 )
+                print(f"DEBUG ask() | brewing | recent_shots found={len(recent_shots)}")
                 if recent_shots:
                     diagnosis = _diagnose_shot(recent_shots[0])
+                    print(f"DEBUG ask() | brewing | diagnosis=\n{diagnosis}")
                     parts.append(
                         f"── YOUR MOST RECENT {brew_methods[0]['name'].upper()} SHOT ──\n{diagnosis}"
                     )
@@ -1200,6 +1204,7 @@ def ask(query: str) -> str:
                     .execute()
                     .data
                 )
+                print(f"DEBUG ask() | brewing fallback | shots found={len(fallback)}")
                 if fallback:
                     shot        = fallback[0]
                     method_name = shot.get("brew_method", "")
@@ -1209,6 +1214,7 @@ def ask(query: str) -> str:
                             f"── BREWING RULES (inferred from last shot: {method_name}) ──\n{rules_block}"
                         )
                     diagnosis = _diagnose_shot(shot)
+                    print(f"DEBUG ask() | brewing fallback | diagnosis=\n{diagnosis}")
                     label = method_name.upper() if method_name else "LAST"
                     parts.append(f"── YOUR MOST RECENT {label} SHOT ──\n{diagnosis}")
 
@@ -1233,6 +1239,7 @@ def ask(query: str) -> str:
                 n for n in _extract_mentioned_nodes(query)
                 if n["node_type"] == "BrewMethod"
             ]
+            print(f"DEBUG ask() | diagnosis | mentioned_methods={[m['name'] for m in mentioned_methods]}")
             if mentioned_methods:
                 recent_shots = (
                     supabase.table("shots")
@@ -1253,25 +1260,32 @@ def ask(query: str) -> str:
                     .data
                 )
 
+            print(f"DEBUG ask() | diagnosis | recent_shots found={len(recent_shots)}")
             if recent_shots:
                 shot        = recent_shots[0]
                 method_name = shot.get("brew_method", "?")
                 diagnosis   = _diagnose_shot(shot)
+                print(f"DEBUG ask() | diagnosis | method={method_name} | diagnosis=\n{diagnosis}")
                 parts.append(f"── SHOT DIAGNOSIS ({method_name.upper()}) ──\n{diagnosis}")
 
             # Defect graph traversal — this is what makes the answer
             # neuro-symbolic rather than purely retrieval-based.
             # The LLM should narrate these edges, not re-invent them.
             defect_ctx = _get_defect_graph_context(query)
+            print(f"DEBUG ask() | diagnosis | defect_ctx present={bool(defect_ctx)}")
             if defect_ctx:
                 parts.append(defect_ctx)
 
         elif intent == "recommendation":
             parts.append(f"── VALUE FOR MONEY ANALYSIS ──\n{_analyze_best_value_coffees()}")
 
-        return "\n\n".join(p for p in parts if p.strip())
+        result = "\n\n".join(p for p in parts if p.strip())
+        print(f"DEBUG ask() | final context sent to LLM: {len(result)} chars | parts={len(parts)}")
+        return result
 
     except Exception as e:
+        import traceback
+        print(f"DEBUG ask() | EXCEPTION: {e}\n{traceback.format_exc()}")
         return f"Error in ask: {str(e)}"
 
 
