@@ -1,4 +1,5 @@
 import os
+import re
 from collections import Counter
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -566,10 +567,45 @@ def _get_user_context() -> str:
         return f"── YOUR CONTEXT ──\n  (unavailable: {str(e)})"
 
 
+# =============================================================================
+# DEFECT VOCABULARY — used by both intent classification and graph traversal.
+#
+# _DEFECT_WORD_MAP  : maps a lowercase query substring to the exact Defect node
+#   name stored in knowledge_nodes.  If a user types "channeling" we can look
+#   up the "Channeling" node and traverse its CAUSES / PREVENTS edges directly.
+#
+# _NEGATIVE_SENSORY_WORDS : broader set of negative-taste / problem signals
+#   that don't have a 1:1 Defect node but still indicate "something went wrong
+#   with my shot".  They trigger the diagnosis intent so the last shot is
+#   fetched and diagnosed even when the user doesn't name a brew method.
+# =============================================================================
+
+_DEFECT_WORD_MAP: dict[str, str] = {
+    "channeling":   "Channeling",
+    "baked":        "Baked",
+    "sour ferment": "Sour Ferment",
+    "astringent":   "Astringency",
+    "astringency":  "Astringency",
+    "grassy":       "Grassy",
+}
+
+_NEGATIVE_SENSORY_WORDS: frozenset[str] = frozenset({
+    "sour", "bitter", "harsh", "flat", "hollow", "vinegar", "acetic",
+    "papery", "rubbery", "dry", "rough", "off", "wrong", "went wrong",
+    "bad shot", "fix my", "help me fix", "diagnose",
+    "over-extracted", "under-extracted", "over extracted", "under extracted",
+    "why was my", "why did my", "what happened",
+})
+
+
 def _classify_intent(query: str) -> str:
     """
     Keyword-based intent classification.
-    Returns one of: 'recommendation' | 'brewing' | 'knowledge'
+    Returns one of: 'recommendation' | 'diagnosis' | 'brewing' | 'knowledge'
+
+    Order matters: diagnosis is checked before brewing because many defect
+    queries contain brewing words ("shot", "extract") and would otherwise
+    be misrouted, causing the diagnosis pipeline to be skipped entirely.
     """
     q = query.lower()
     if any(w in q for w in [
@@ -577,6 +613,12 @@ def _classify_intent(query: str) -> str:
         "worth", "value", "vfm", "try next", "should i buy", "what should i try",
     ]):
         return "recommendation"
+    # Diagnosis: any defect node word OR negative-sensory signal.
+    # These queries need shot data + CAUSES/PREVENTS graph traversal, not
+    # just brewing rules — so they get their own routing branch.
+    if (any(w in q for w in _DEFECT_WORD_MAP)
+            or any(w in q for w in _NEGATIVE_SENSORY_WORDS)):
+        return "diagnosis"
     if any(w in q for w in [
         "how", "brew", "make", "grind", "temperature", "temp",
         "ratio", "dose", "pour", "steep", "extract", "pull", "shot",
@@ -584,6 +626,442 @@ def _classify_intent(query: str) -> str:
     ]):
         return "brewing"
     return "knowledge"
+
+
+# =============================================================================
+# DEFECT GRAPH CONTEXT — pure graph traversal, no inference
+#
+# Reads CAUSES (inbound) and PREVENTS (inbound) edges for any Defect nodes
+# matched in the query.  Returns a formatted string block that the LLM uses
+# to explain *why* a shot tasted wrong and *what to do* about it.
+#
+# Architecture note: all thresholds and causal claims live in the graph as
+# node properties and edge evidence strings.  This function never hard-codes
+# what causes or prevents a defect — it only reads what the graph says.
+# =============================================================================
+
+def _get_defect_graph_context(query: str) -> str:
+    """
+    Scan `query` for known Defect node names and return a structured block
+    showing what CAUSES each matched defect and what PREVENTS it.
+
+    Two discovery passes:
+      1. Static map (_DEFECT_WORD_MAP) — fast lowercase substring match.
+      2. Entity extraction (_extract_mentioned_nodes) — catches Defect nodes
+         whose names don't appear in the static map (e.g. nodes added via
+         book ingestion after this code was written).
+
+    Caps at 2 defects to keep the context block tight.
+    """
+    q = query.lower()
+
+    # Pass 1: static map
+    defect_names: list[str] = []
+    for word, name in _DEFECT_WORD_MAP.items():
+        if word in q and name not in defect_names:
+            defect_names.append(name)
+
+    # Pass 2: entity extraction (catches future nodes not in the static map)
+    for node in _extract_mentioned_nodes(query):
+        if node["node_type"] == "Defect" and node["name"] not in defect_names:
+            defect_names.append(node["name"])
+
+    if not defect_names:
+        return ""
+
+    try:
+        sections: list[str] = [
+            f"── DEFECT GRAPH CONTEXT ({len(defect_names)} defect(s) identified) ──"
+        ]
+
+        for defect_name in defect_names[:2]:
+            defect_rows = (
+                supabase.table("knowledge_nodes")
+                .select("id, name, properties")
+                .eq("node_type", "Defect")
+                .eq("name", defect_name)
+                .execute()
+                .data
+            )
+            if not defect_rows:
+                continue
+
+            defect    = defect_rows[0]
+            defect_id = defect["id"]
+            p         = defect["properties"]
+
+            sections.append(f"\n[Defect] {defect['name']}")
+            sections.append(f"  Stage    : {p.get('stage', '?')}")
+            sections.append(f"  Severity : {p.get('severity', '?')}")
+            sections.append(f"  Feels like : {str(p.get('sensory_description', '?'))[:120]}")
+            sections.append(f"  Root fix : {p.get('corrective_action', '?')}")
+
+            # ── CAUSES inbound: X → CAUSES → this defect ─────────────────────
+            # These are the upstream sources that produce this defect.
+            # Could be another Defect (cascades), a SensoryDescriptor (chemistry),
+            # or a brewing condition.
+            causes_edges = (
+                supabase.table("knowledge_edges")
+                .select("source_id, properties")
+                .eq("target_id", defect_id)
+                .eq("relationship_type", "CAUSES")
+                .execute()
+                .data
+            )
+            if causes_edges:
+                src_ids = [e["source_id"] for e in causes_edges]
+                src_map = {
+                    n["id"]: n
+                    for n in supabase.table("knowledge_nodes")
+                    .select("id, node_type, name")
+                    .in_("id", src_ids)
+                    .execute()
+                    .data
+                }
+                sections.append("  Caused by:")
+                for e in causes_edges:
+                    src  = src_map.get(e["source_id"], {})
+                    conf = e["properties"].get("confidence", "?")
+                    evid = str(e["properties"].get("evidence", ""))[:90]
+                    sections.append(
+                        f"    ← CAUSES ← [{src.get('node_type','?')}] {src.get('name','?')}"
+                        f"  (confidence {conf})"
+                    )
+                    if evid:
+                        sections.append(f"      evidence: {evid}")
+
+            # ── PREVENTS inbound: X → PREVENTS → this defect ─────────────────
+            # These are the techniques and rules that eliminate this defect
+            # when applied correctly.  This is what Bean should recommend.
+            prevents_edges = (
+                supabase.table("knowledge_edges")
+                .select("source_id, properties")
+                .eq("target_id", defect_id)
+                .eq("relationship_type", "PREVENTS")
+                .execute()
+                .data
+            )
+            if prevents_edges:
+                prev_ids = [e["source_id"] for e in prevents_edges]
+                prev_map = {
+                    n["id"]: n
+                    for n in supabase.table("knowledge_nodes")
+                    .select("id, node_type, name, properties")
+                    .in_("id", prev_ids)
+                    .execute()
+                    .data
+                }
+                sections.append("  Prevented by:")
+                for e in prevents_edges:
+                    src  = prev_map.get(e["source_id"], {})
+                    conf = e["properties"].get("confidence", "?")
+                    sections.append(
+                        f"    → PREVENTS ← [{src.get('node_type','?')}] {src.get('name','?')}"
+                        f"  (confidence {conf})"
+                    )
+                    # Surface the technique's purpose so the LLM can paraphrase it
+                    if src.get("node_type") == "BrewingTechnique":
+                        purpose = str((src.get("properties") or {}).get("purpose", ""))[:100]
+                        if purpose:
+                            sections.append(f"      purpose: {purpose}")
+                    elif src.get("node_type") == "BrewingRule":
+                        desc = str((src.get("properties") or {}).get("description", ""))[:100]
+                        if desc:
+                            sections.append(f"      rule: {desc}")
+
+        return "\n".join(sections)
+
+    except Exception as e:
+        return f"── DEFECT GRAPH CONTEXT ──\n  (unavailable: {str(e)})"
+
+
+# =============================================================================
+# DIAGNOSIS ENGINE — rule-based inference over BrewingRule graph nodes
+#
+# These three helpers form the core of step 3 of the semantic layer.
+# The key architectural principle: thresholds live in the graph as BrewingRule
+# nodes, not hardcoded in Python. Adding a book adds new rules; the diagnosis
+# engine automatically uses them — zero code changes required.
+# =============================================================================
+
+def _parse_value_range(value_range: str) -> tuple[float, float] | None:
+    """
+    Parse a BrewingRule dictates.value_range string into a (min, max) float pair.
+
+    Handles the formats present in the graph:
+      "25-35"           → (25.0, 35.0)
+      "94-96"           → (94.0, 96.0)
+      "1:1.8 to 1:2.5"  → (1.8, 2.5)   — right-side of ratio extracted
+      "1:15-1:17"       → (15.0, 17.0)  — right-side of ratio extracted
+      "200-400"          → (200.0, 400.0)
+      "Fine (200-400…)"  → (200.0, 400.0) — numbers extracted from context
+
+    Returns None when the range is non-numeric or too complex to evaluate
+    (e.g. "concentrate_then_dilute").  Callers mark those rules UNCHECKED.
+    """
+    if not value_range:
+        return None
+
+    # Ratio patterns: "1:15 to 1:17" or "1:1.8-1:2.5"
+    # Extract the right-hand side of every "1:X" token.
+    ratio_parts = re.findall(r'1:(\d+\.?\d*)', value_range)
+    if len(ratio_parts) >= 2:
+        try:
+            lo, hi = float(ratio_parts[0]), float(ratio_parts[-1])
+            return (min(lo, hi), max(lo, hi))
+        except ValueError:
+            pass
+
+    # Parenthesised range: "(200-400 microns)" or "(1.8-2.5 acceptable)"
+    paren_match = re.search(r'\((\d+\.?\d*)\s*[-–]\s*(\d+\.?\d*)', value_range)
+    if paren_match:
+        try:
+            return (float(paren_match.group(1)), float(paren_match.group(2)))
+        except ValueError:
+            pass
+
+    # Simple "X-Y" or "X to Y"
+    plain_match = re.search(r'(\d+\.?\d*)\s*(?:[-–]|to)\s*(\d+\.?\d*)', value_range)
+    if plain_match:
+        try:
+            lo, hi = float(plain_match.group(1)), float(plain_match.group(2))
+            return (min(lo, hi), max(lo, hi))
+        except ValueError:
+            pass
+
+    return None
+
+
+def _get_corrective_action(parameter: str, side: str, brew_method: str) -> str:
+    """
+    Return a concrete, method-aware corrective instruction for a parameter
+    violation.  `side` is "below" or "above".
+
+    Specificity hierarchy: exact match → parameter+side fallback → generic.
+    """
+    lookup: dict[tuple, str] = {
+        ("extraction_time",  "below", "Espresso"):  "Grind 1-2 steps finer to slow flow and extend extraction time",
+        ("extraction_time",  "above", "Espresso"):  "Grind 1-2 steps coarser to speed up flow",
+        ("yield_ratio",      "below", "Espresso"):  "Let the shot run longer — stop when yield hits target weight on the scale",
+        ("yield_ratio",      "above", "Espresso"):  "Stop the shot earlier — reduce your yield target",
+        ("brew_ratio",       "below", "V60"):        "Use less coffee or more water to approach the 1:15–1:17 window",
+        ("brew_ratio",       "above", "V60"):        "Use more coffee or less water",
+        ("brew_ratio",       "below", "Chemex"):     "Use less coffee or more water",
+        ("brew_ratio",       "above", "Chemex"):     "Use more coffee or less water",
+        ("brew_ratio",       "below", "French Press"): "Use less coffee or more water",
+        ("brew_ratio",       "above", "French Press"): "Use more coffee or less water",
+        ("water_temperature","below", "Espresso"):   "Raise boiler setpoint or flush the group head for 5-8s before pulling",
+        ("water_temperature","above", "Espresso"):   "Lower boiler setpoint or allow machine to cool 20-30s before pulling",
+        ("water_temperature","below", "V60"):        "Bring water closer to 96°C — use a temperature-controlled kettle or pour sooner after boiling",
+        ("water_temperature","above", "V60"):        "Allow boiled water to cool for 30-60s before pouring",
+    }
+    specific = lookup.get((parameter, side, brew_method))
+    if specific:
+        return specific
+    param_fallback = {
+        ("extraction_time",  "below"): "Grind finer or increase dose to slow extraction",
+        ("extraction_time",  "above"): "Grind coarser or decrease dose to speed up extraction",
+        ("brew_ratio",       "below"): "Use less coffee or more water to increase ratio",
+        ("brew_ratio",       "above"): "Use more coffee or less water to decrease ratio",
+        ("yield_ratio",      "below"): "Pull more liquid to reach target yield",
+        ("yield_ratio",      "above"): "Stop the shot sooner",
+        ("water_temperature","below"): "Use hotter water",
+        ("water_temperature","above"): "Use cooler water",
+    }
+    fallback = param_fallback.get((parameter, side))
+    if fallback:
+        return fallback
+    return f"Adjust {parameter.replace('_', ' ')} {'up' if side == 'below' else 'down'} toward target range"
+
+
+def _diagnose_shot(shot: dict) -> str:
+    """
+    Compare a shot record against every BrewingRule that APPLIES_TO its method.
+
+    For each rule whose dictates.direction is "target_range" we compare the
+    shot's actual value against the parsed value_range and classify as:
+      VIOLATED  — actual is outside range; includes corrective action + evidence
+      COMPLIANT — actual is within range
+    Rules with directional hints ("increase" / "decrease") are shown as
+    CONTEXT — they give calibration guidance without being strict pass/fail.
+    Rules whose parameter is not tracked in the shots table (bloom_time,
+    grind_size in microns, etc.) are labelled UNCHECKED.
+
+    Violations are sorted by confidence descending so the most evidence-backed
+    issues surface first.  All thresholds come from graph BrewingRule nodes —
+    adding new rules via book ingestion instantly enriches future diagnoses.
+    """
+    brew_method = shot.get("brew_method", "")
+    if not brew_method:
+        return "Cannot diagnose: shot has no brew_method."
+
+    try:
+        # ── 1. Resolve BrewMethod node ──────────────────────────────────────
+        method_nodes = supabase.table("knowledge_nodes") \
+            .select("id, name") \
+            .eq("node_type", "BrewMethod") \
+            .ilike("name", f"%{brew_method}%").execute().data
+        if not method_nodes:
+            return f"No BrewMethod node found for '{brew_method}' — cannot run diagnosis."
+        method = method_nodes[0]
+
+        # ── 2. Fetch all BrewingRules that APPLY_TO this method ──────────────
+        inbound = supabase.table("knowledge_edges") \
+            .select("source_id") \
+            .eq("target_id", method["id"]) \
+            .eq("relationship_type", "APPLIES_TO").execute().data
+        if not inbound:
+            return f"No BrewingRules found for '{method['name']}' — graph may need seeding."
+
+        rule_ids  = [e["source_id"] for e in inbound]
+        rules     = supabase.table("knowledge_nodes") \
+            .select("name, properties") \
+            .eq("node_type", "BrewingRule") \
+            .in_("id", rule_ids).execute().data
+
+        # ── 3. Compute derived shot values ───────────────────────────────────
+        dose   = float(shot.get("dose")  or 0)
+        yield_g = float(shot.get("yield") or shot.get("yield_g") or 0)
+        ratio  = round(yield_g / dose, 3) if dose > 0 else None
+
+        shot_values: dict[str, float | None] = {
+            "water_temperature": _safe_float(shot.get("brew_temp")),
+            "extraction_time":   _safe_float(shot.get("extraction_time")),
+            "brew_ratio":        ratio,
+            "yield_ratio":       ratio,   # same computation, different rule names
+            "bloom_time":        None,    # not tracked in shots table
+            "grind_size":        None,    # stored as setting string, not microns
+        }
+
+        # ── 4. Evaluate each rule ────────────────────────────────────────────
+        violated:  list[dict] = []
+        compliant: list[dict] = []
+        context:   list[dict] = []
+        unchecked: list[dict] = []
+
+        for rule in rules:
+            p        = rule["properties"]
+            dictates = p.get("dictates", {})
+            param    = dictates.get("parameter", "")
+            direction = dictates.get("direction", "")
+            val_range = dictates.get("value_range", "")
+            unit     = dictates.get("unit", "")
+            confidence = float(p.get("confidence", 0.5))
+            evidence = p.get("evidence", "")
+            pid      = p.get("pid_specificity", {})
+
+            actual = shot_values.get(param)
+
+            # Parameter not tracked in shot data
+            if actual is None:
+                unchecked.append({
+                    "rule":   rule["name"],
+                    "reason": f"'{param}' is not recorded in shot data",
+                })
+                continue
+
+            parsed = _parse_value_range(val_range)
+
+            # Directional guidelines ("increase"/"decrease") → CONTEXT bucket
+            if direction in ("increase", "decrease") or parsed is None:
+                context.append({
+                    "rule":       rule["name"],
+                    "param":      param,
+                    "actual":     actual,
+                    "guidance":   f"{direction} toward {val_range} {unit}".strip(),
+                    "confidence": confidence,
+                    "evidence":   evidence,
+                })
+                continue
+
+            # target_range rules → strict VIOLATED / COMPLIANT
+            lo, hi = parsed
+            if lo <= actual <= hi:
+                compliant.append({
+                    "rule":       rule["name"],
+                    "param":      param,
+                    "actual":     actual,
+                    "target":     f"{lo}–{hi} {unit}".strip(),
+                    "confidence": confidence,
+                    "evidence":   evidence,
+                })
+            else:
+                side   = "below" if actual < lo else "above"
+                action = _get_corrective_action(param, side, method["name"])
+                violated.append({
+                    "rule":        rule["name"],
+                    "param":       param,
+                    "actual":      actual,
+                    "target":      f"{lo}–{hi} {unit}".strip(),
+                    "side":        side,
+                    "action":      action,
+                    "confidence":  confidence,
+                    "evidence":    evidence,
+                    "requires_pid": pid.get("requires_pid"),
+                    "workaround":  pid.get("non_pid_alternative", ""),
+                    "description": p.get("description", ""),
+                })
+
+        # Sort violations: highest-confidence issues first
+        violated.sort(key=lambda x: x["confidence"], reverse=True)
+
+        # ── 5. Format output ─────────────────────────────────────────────────
+        header = (
+            f"Diagnosis: {method['name']}  |  "
+            f"{dose}g → {yield_g}g  |  "
+            f"{shot.get('extraction_time')}s  |  "
+            f"score {shot.get('overall_score')}/10"
+        )
+        if ratio:
+            header += f"  |  ratio 1:{ratio:.2f}"
+        lines = [header, ""]
+
+        if violated:
+            lines.append(f"VIOLATED ({len(violated)}):")
+            for v in violated:
+                lines.append(f"  ✗  {v['rule']}")
+                lines.append(f"     {v['param']}: {v['actual']} is {v['side']} target {v['target']}")
+                lines.append(f"     Action  : {v['action']}")
+                if v.get("requires_pid") and v.get("workaround"):
+                    lines.append(f"     No-PID  : {v['workaround']}")
+                lines.append(f"     Evidence: {v['evidence']}  (confidence {v['confidence']:.2f})")
+                lines.append("")
+        else:
+            lines.append("No rule violations detected.")
+            lines.append("")
+
+        if compliant:
+            lines.append(f"COMPLIANT ({len(compliant)}):")
+            for c in compliant:
+                lines.append(
+                    f"  ✓  {c['rule']}: {c['param']} = {c['actual']}  "
+                    f"(target {c['target']}, confidence {c['confidence']:.2f})"
+                )
+            lines.append("")
+
+        if context:
+            lines.append(f"CALIBRATION CONTEXT ({len(context)} guideline(s)):")
+            for g in context:
+                lines.append(f"  ·  {g['rule']}: {g['param']} = {g['actual']} — {g['guidance']}")
+            lines.append("")
+
+        if unchecked:
+            lines.append(f"UNCHECKED ({len(unchecked)} rule(s) — parameters not in shot data):")
+            for u in unchecked:
+                lines.append(f"  —  {u['rule']}: {u['reason']}")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"Diagnosis error: {str(e)}"
+
+
+def _safe_float(value) -> float | None:
+    """Convert a value to float, returning None if not possible."""
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 # =============================================================================
@@ -641,12 +1119,17 @@ def ask(query: str) -> str:
        personalise every response. Their most-used brew method, best-scoring
        method, and overall average score are prepended automatically.
 
-    2. INTENT CLASSIFICATION — Keyword analysis determines which enrichment
-       layer to activate on top of the base retrieval:
-         • "brewing" intent  → also fetches BrewingRules (grind, temp, ratio,
-           PID requirements, no-PID workarounds) for any brew method mentioned.
-         • "recommendation" intent → also runs the VFM analysis across all
-           beans the user has logged shots against.
+    2. INTENT CLASSIFICATION — Keyword analysis routes to one of four pipelines:
+         • "diagnosis" intent  → triggered by defect words ("sour", "bitter",
+           "channeling", "astringent", etc.) or negative-sensory signals. Fetches
+           the user's most recent shot, runs _diagnose_shot() against the graph,
+           and traverses CAUSES/PREVENTS edges for any named Defect nodes.
+         • "brewing" intent  → triggered by how/brew/grind/temp/ratio/shot etc.
+           Fetches BrewingRules for the named method (or infers method from last
+           shot) and appends a full shot diagnosis. PID and no-PID workarounds
+           are surfaced from the graph's pid_specificity JSONB blocks.
+         • "recommendation" intent → runs VFM analysis across all beans the
+           user has logged shots against.
          • "knowledge" intent (default) → base retrieval only.
 
     3. UNIFIED RETRIEVAL — Runs entity extraction (every graph node name
@@ -681,8 +1164,107 @@ def ask(query: str) -> str:
         if intent == "brewing":
             brew_methods = [n for n in _extract_mentioned_nodes(query) if n["node_type"] == "BrewMethod"]
             if brew_methods:
-                rules_block = "\n\n".join(_get_brewing_rules_for_method(m["name"]) for m in brew_methods[:2])
+                # Named brew method: fetch its rules + diagnose the most recent
+                # shot made with that method.  This grounds the answer in the
+                # user's actual parameters rather than generic advice.
+                rules_block = "\n\n".join(
+                    _get_brewing_rules_for_method(m["name"]) for m in brew_methods[:2]
+                )
                 parts.append(f"── BREWING RULES ──\n{rules_block}")
+
+                recent_shots = (
+                    supabase.table("shots")
+                    .select("*")
+                    .eq("brew_method", brew_methods[0]["name"])
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute()
+                    .data
+                )
+                if recent_shots:
+                    diagnosis = _diagnose_shot(recent_shots[0])
+                    parts.append(
+                        f"── YOUR MOST RECENT {brew_methods[0]['name'].upper()} SHOT ──\n{diagnosis}"
+                    )
+            else:
+                # No brew method named in the query (e.g. "how do I adjust my
+                # grind?").  Fall back to the user's most recent shot, infer
+                # its method, and run both the rules block and diagnosis against
+                # that method.  This keeps the answer personal and concrete even
+                # when the user doesn't specify a method.
+                fallback = (
+                    supabase.table("shots")
+                    .select("*")
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute()
+                    .data
+                )
+                if fallback:
+                    shot        = fallback[0]
+                    method_name = shot.get("brew_method", "")
+                    if method_name:
+                        rules_block = _get_brewing_rules_for_method(method_name)
+                        parts.append(
+                            f"── BREWING RULES (inferred from last shot: {method_name}) ──\n{rules_block}"
+                        )
+                    diagnosis = _diagnose_shot(shot)
+                    label = method_name.upper() if method_name else "LAST"
+                    parts.append(f"── YOUR MOST RECENT {label} SHOT ──\n{diagnosis}")
+
+        elif intent == "diagnosis":
+            # Defect-heavy query ("why was my shot sour?", "I'm getting
+            # channeling", "it tasted bitter and harsh").
+            #
+            # Two-part response:
+            #   A. Shot diagnosis  — compare the user's last shot parameters
+            #      against every BrewingRule that applies to its method.
+            #      Tells the LLM *which rules were violated* and *what to fix*.
+            #   B. Defect graph context — traverse CAUSES (what produced this
+            #      defect) and PREVENTS (what eliminates it) edges in the graph.
+            #      Gives the LLM the causal chain so it can explain *why*, not
+            #      just *what*.
+            #
+            # If the query names a specific brew method, we fetch that method's
+            # most recent shot.  Otherwise we fall back to the globally most
+            # recent shot and infer its method.
+
+            mentioned_methods = [
+                n for n in _extract_mentioned_nodes(query)
+                if n["node_type"] == "BrewMethod"
+            ]
+            if mentioned_methods:
+                recent_shots = (
+                    supabase.table("shots")
+                    .select("*")
+                    .eq("brew_method", mentioned_methods[0]["name"])
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute()
+                    .data
+                )
+            else:
+                recent_shots = (
+                    supabase.table("shots")
+                    .select("*")
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute()
+                    .data
+                )
+
+            if recent_shots:
+                shot        = recent_shots[0]
+                method_name = shot.get("brew_method", "?")
+                diagnosis   = _diagnose_shot(shot)
+                parts.append(f"── SHOT DIAGNOSIS ({method_name.upper()}) ──\n{diagnosis}")
+
+            # Defect graph traversal — this is what makes the answer
+            # neuro-symbolic rather than purely retrieval-based.
+            # The LLM should narrate these edges, not re-invent them.
+            defect_ctx = _get_defect_graph_context(query)
+            if defect_ctx:
+                parts.append(defect_ctx)
 
         elif intent == "recommendation":
             parts.append(f"── VALUE FOR MONEY ANALYSIS ──\n{_analyze_best_value_coffees()}")
@@ -749,29 +1331,14 @@ def log_shot(
             return "Shot insert returned no data. Check Supabase logs."
 
         shot = resp.data[0]
-        lines = [f"Shot logged. ID: {shot.get('id')}"]
-        lines.append(f"  {brew_method} | {dose}g → {yield_g}g | {extraction_time}s | {overall_score}/10")
+        header = f"Shot logged. ID: {shot.get('id')}"
 
-        # Graph-grounded feedback
-        brew_ratio = round(yield_g / dose, 2) if dose > 0 else 0
-        if brew_method == "Espresso":
-            if extraction_time < 25:
-                lines.append("Graph insight: Shot ran fast (<25s). Grind finer or increase dose to slow extraction.")
-            elif extraction_time > 35:
-                lines.append("Graph insight: Shot ran slow (>35s). Grind coarser or reduce dose.")
-            else:
-                lines.append("Graph insight: Extraction time within optimal 25-35s window.")
-            if brew_ratio < 1.8:
-                lines.append(f"Graph insight: Ratio {brew_ratio:.2f} is below the 1:2 target — consider pulling longer.")
-            elif brew_ratio > 2.5:
-                lines.append(f"Graph insight: Ratio {brew_ratio:.2f} is above 1:2.5 — shot may be dilute.")
-        elif brew_method in ("V60", "Chemex"):
-            if not (15 <= brew_ratio <= 17):
-                lines.append(f"Graph insight: Ratio {brew_ratio:.2f} is outside the Golden Ratio window of 1:15-1:17.")
-            else:
-                lines.append(f"Graph insight: Ratio {brew_ratio:.2f} is within the Golden Ratio range.")
+        # Run the graph diagnosis engine against the inserted shot record.
+        # Thresholds come entirely from BrewingRule nodes in the knowledge
+        # graph — no hardcoded numbers here.
+        diagnosis = _diagnose_shot(shot)
 
-        return "\n".join(lines)
+        return f"{header}\n\n{diagnosis}"
 
     except Exception as e:
         return f"Error logging shot: {str(e)}"
