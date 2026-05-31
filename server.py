@@ -253,6 +253,23 @@ def _get_nodes_by_type(node_type: str) -> str:
                 lines.append(f"    ratio: {p.get('brew_ratio', p.get('brew_ratio_min','?'))}  |  filter: {p.get('filter_type','?')}")
             elif node_type == "EquipmentType":
                 lines.append(f"    {p.get('grind_distribution', p.get('temperature_control',''))}")
+            elif node_type == "Cultivar":
+                lines.append(f"    {p.get('cup_profile','')}")
+                lines.append(f"    origins: {', '.join(p.get('typical_origins', []))}")
+            elif node_type == "Region":
+                lines.append(f"    parent: {p.get('parent_origin','')}  |  alt: {p.get('altitude_range_m','')}")
+                lines.append(f"    {p.get('cup_profile','')}")
+            elif node_type == "Defect":
+                lines.append(f"    stage: {p.get('stage','')}  |  severity: {p.get('severity','')}")
+                lines.append(f"    {p.get('sensory_description','')[:100]}")
+            elif node_type == "BrewingTechnique":
+                lines.append(f"    {p.get('purpose','')[:100]}")
+                lines.append(f"    applies to: {', '.join(p.get('applies_to_methods', []))}")
+            elif node_type == "SensoryDescriptor":
+                lines.append(f"    {p.get('perception','')}")
+                lines.append(f"    class: {p.get('chemical_class','')}")
+            elif node_type == "Expert":
+                lines.append(f"    {p.get('known_for','')[:100]}")
             lines.append("")
         return "\n".join(lines)
     except Exception as e:

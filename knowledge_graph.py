@@ -1,8 +1,6 @@
 # Strictly typed coffee knowledge graph.
-# node_type:         Origin | ProcessMethod | RoastLevel | FlavorNote | BrewMethod |
-#                    BrewingRule | BrewParameter | EquipmentType | GrindProfile
-# relationship_type: TYPICAL_FLAVOR | PRODUCES_FLAVOR | EMPHASIZES | ENHANCES |
-#                    DICTATES | APPLIES_TO | SUGGESTS_TEMP | PRODUCES | SUPPRESSES | PAIRS_WITH
+# Valid node_type and relationship_type values are defined in schema.py.
+# Run `python schema.py` to validate this file against the schema.
 
 NODES = [
 
@@ -483,6 +481,406 @@ NODES = [
     },
 
     # =========================================================================
+    # =========================================================================
+    # CULTIVARS (5)
+    # Why separate from Origin: Gesha grown in Ethiopia vs. Panama tastes
+    # different because of terroir, but it's the same genetic cultivar.
+    # Keeping cultivar as its own type lets us model that distinction with
+    # GROWN_IN edges rather than duplicating properties on Origin nodes.
+    # =========================================================================
+    {
+        "node_type": "Cultivar",
+        "name": "Gesha",
+        "properties": {
+            "species": "Arabica",
+            "genetic_lineage": "Ethiopian heirloom, discovered in Gesha village, Kaffa region",
+            "cup_profile": "Intensely floral, jasmine, bergamot, stone fruit, tea-like clarity",
+            "typical_origins": ["Ethiopia", "Panama", "Colombia"],
+            "yield": "Very low — contributes to premium pricing",
+            "altitude_preference_m": "1700-2200"
+        }
+    },
+    {
+        "node_type": "Cultivar",
+        "name": "Bourbon",
+        "properties": {
+            "species": "Arabica",
+            "genetic_lineage": "Mutation of Typica, first cultivated on Réunion island (formerly Bourbon)",
+            "cup_profile": "Complex sweetness, red fruit, caramel, well-balanced acidity",
+            "typical_origins": ["Colombia", "Guatemala", "El Salvador", "Brazil"],
+            "yield": "Medium",
+            "altitude_preference_m": "1000-2000",
+            "variants": ["Red Bourbon", "Yellow Bourbon", "Orange Bourbon", "Pink Bourbon"]
+        }
+    },
+    {
+        "node_type": "Cultivar",
+        "name": "Typica",
+        "properties": {
+            "species": "Arabica",
+            "genetic_lineage": "One of the oldest Arabica cultivars; ancestral lineage for most modern varieties",
+            "cup_profile": "Clean, classic, mild sweetness, low acidity, delicate",
+            "typical_origins": ["Jamaica", "Hawaii", "Peru", "Papua New Guinea"],
+            "yield": "Low — susceptible to disease",
+            "altitude_preference_m": "1000-1800"
+        }
+    },
+    {
+        "node_type": "Cultivar",
+        "name": "SL28",
+        "properties": {
+            "species": "Arabica",
+            "genetic_lineage": "Selected by Scott Laboratories in Kenya in the 1930s from Tanganyika Drought Resistant",
+            "cup_profile": "Blackcurrant, bold acidity, winey complexity, full body",
+            "typical_origins": ["Kenya"],
+            "yield": "Medium",
+            "altitude_preference_m": "1500-2100",
+            "notes": "The cultivar most responsible for Kenya's distinctive cup profile"
+        }
+    },
+    {
+        "node_type": "Cultivar",
+        "name": "Catuai",
+        "properties": {
+            "species": "Arabica",
+            "genetic_lineage": "Hybrid of Mundo Novo x Caturra, developed in Brazil in the 1950s",
+            "cup_profile": "Mild, sweet, low acidity, chocolate, nuts",
+            "typical_origins": ["Brazil", "Colombia", "Central America"],
+            "yield": "High — one of the most widely planted Arabica varieties",
+            "altitude_preference_m": "800-1500",
+            "variants": ["Red Catuai", "Yellow Catuai"]
+        }
+    },
+
+    # =========================================================================
+    # REGIONS (5)
+    # Why separate from Origin: Origin is country-level. Region adds the
+    # sub-national specificity that specialty coffee buyers actually use.
+    # Each Region gets a SUB_REGION_OF edge to its parent Origin.
+    # =========================================================================
+    {
+        "node_type": "Region",
+        "name": "Yirgacheffe",
+        "properties": {
+            "parent_origin": "Ethiopia",
+            "altitude_range_m": "1700-2200",
+            "cup_profile": "The global reference for washed floral coffee: jasmine, bergamot, lemon, tea-like body",
+            "dominant_process": "Washed",
+            "primary_cultivars": ["Ethiopian heirlooms"],
+            "notable_sub_zones": ["Kochere", "Gedeb", "Aricha"]
+        }
+    },
+    {
+        "node_type": "Region",
+        "name": "Sidama",
+        "properties": {
+            "parent_origin": "Ethiopia",
+            "altitude_range_m": "1500-2200",
+            "cup_profile": "Blueberry, stone fruit, mild chocolate — slightly earthier and fuller than Yirgacheffe",
+            "dominant_process": "Both Washed and Natural",
+            "primary_cultivars": ["Ethiopian heirlooms"],
+            "notable_sub_zones": ["Bensa", "Arbegona", "Shantawene"]
+        }
+    },
+    {
+        "node_type": "Region",
+        "name": "Huila",
+        "properties": {
+            "parent_origin": "Colombia",
+            "altitude_range_m": "1500-2000",
+            "cup_profile": "Complex, bright acidity, tropical fruit, caramel, excellent sweetness",
+            "dominant_process": "Washed",
+            "primary_cultivars": ["Castillo", "Colombia", "Caturra"],
+            "notes": "One of Colombia's most prized departments for specialty production"
+        }
+    },
+    {
+        "node_type": "Region",
+        "name": "Cerrado",
+        "properties": {
+            "parent_origin": "Brazil",
+            "altitude_range_m": "800-1100",
+            "cup_profile": "Chocolate, nuts, low acidity, heavy body — classic Brazilian espresso base",
+            "dominant_process": "Natural, Pulped Natural",
+            "primary_cultivars": ["Catuai", "Mundo Novo"],
+            "notes": "First Brazilian region to receive a geographical indication (GI)"
+        }
+    },
+    {
+        "node_type": "Region",
+        "name": "Antigua",
+        "properties": {
+            "parent_origin": "Guatemala",
+            "altitude_range_m": "1500-1700",
+            "cup_profile": "Full body, dark chocolate, brown sugar, mild fruit, volcanic mineral notes",
+            "dominant_process": "Washed",
+            "primary_cultivars": ["Bourbon", "Typica", "Caturra"],
+            "notes": "Surrounded by three volcanoes; volcanic soil contributes mineral complexity"
+        }
+    },
+
+    # =========================================================================
+    # DEFECTS (5)
+    # Why model defects as nodes: The diagnosis engine needs to traverse
+    # CAUSES and PREVENTS edges. If defects are only strings in properties,
+    # the graph cannot reason about them structurally.
+    # =========================================================================
+    {
+        "node_type": "Defect",
+        "name": "Channeling",
+        "properties": {
+            "stage": "Brewing",
+            "sensory_description": "Bitter, uneven, one-dimensional — water finds the path of least resistance, leaving dry pockets under-extracted and wet pockets over-extracted simultaneously",
+            "primary_cause": "Uneven coffee bed: clumping, voids, or poor distribution before tamping",
+            "severity": "High — renders shot unpredictable mid-pull",
+            "corrective_action": "Apply WDT before tamping; ensure level distribution; check grind consistency"
+        }
+    },
+    {
+        "node_type": "Defect",
+        "name": "Baked",
+        "properties": {
+            "stage": "Roasting",
+            "sensory_description": "Flat, cardboard, bread-like, hollow sweetness — developed but no complexity or brightness",
+            "primary_cause": "Roast development too slow; bean temperature stalls during development phase",
+            "severity": "Medium — cannot be corrected in brewing; is a roast defect",
+            "corrective_action": "Roaster must increase rate of rise during development; unfixable by barista"
+        }
+    },
+    {
+        "node_type": "Defect",
+        "name": "Sour Ferment",
+        "properties": {
+            "stage": "Processing",
+            "sensory_description": "Vinegar, acetic, sharp unpleasant sourness — distinct from clean citric acidity",
+            "primary_cause": "Over-fermentation during wet processing: too long in fermentation tank or contaminated water",
+            "severity": "High — a processing defect in the green bean; unfixable in roasting or brewing",
+            "corrective_action": "Select beans from producers with controlled fermentation times and clean water"
+        }
+    },
+    {
+        "node_type": "Defect",
+        "name": "Astringency",
+        "properties": {
+            "stage": "Brewing",
+            "sensory_description": "Drying, gripping, tannin-like mouthfeel — leaves inside of mouth feeling parched and rough",
+            "primary_cause": "Over-extraction OR channeling creating locally over-extracted pockets",
+            "severity": "Medium — reduces cup quality significantly; partially correctable",
+            "corrective_action": "Coarsen grind, reduce extraction time, lower water temperature, or fix puck prep"
+        }
+    },
+    {
+        "node_type": "Defect",
+        "name": "Grassy",
+        "properties": {
+            "stage": "Roasting",
+            "sensory_description": "Raw, green, fresh-cut grass, hay — the coffee tastes underdeveloped",
+            "primary_cause": "Under-roasted: insufficient internal bean temperature during development phase",
+            "severity": "Medium — a roast defect; partially masked by higher brew temperature",
+            "corrective_action": "Brew at 94-96°C to extract more from dense under-developed cells; sourcing fix is better roasted coffee"
+        }
+    },
+
+    # =========================================================================
+    # BREWING TECHNIQUES (5)
+    # Why separate from BrewMethod: Espresso is a method. WDT is something
+    # you do inside that method. Techniques REFINE methods (not methods
+    # themselves) and PREVENT defects — relationships BrewMethod can't have.
+    # =========================================================================
+    {
+        "node_type": "BrewingTechnique",
+        "name": "WDT",
+        "properties": {
+            "full_name": "Weiss Distribution Technique",
+            "purpose": "Break up clumps and evenly distribute espresso grounds in the portafilter basket before tamping, preventing channeling",
+            "applies_to_methods": ["Espresso"],
+            "difficulty": "Low",
+            "equipment_required": "WDT tool (thin needles ~0.3-0.4mm) or repurposed acupuncture needles",
+            "time_added_s": 10
+        }
+    },
+    {
+        "node_type": "BrewingTechnique",
+        "name": "Rao Spin",
+        "properties": {
+            "full_name": "Rao Spinning Technique",
+            "purpose": "Swirl the espresso cup immediately after the pull to integrate crema and body for a uniform, sweeter cup",
+            "applies_to_methods": ["Espresso"],
+            "difficulty": "Very low",
+            "equipment_required": "None beyond the espresso cup",
+            "time_added_s": 3
+        }
+    },
+    {
+        "node_type": "BrewingTechnique",
+        "name": "Bypass Brewing",
+        "properties": {
+            "full_name": "Bypass Dilution Brewing",
+            "purpose": "Brew at higher concentration (1:10), then dilute with hot water to target TDS. More even extraction due to denser bed",
+            "applies_to_methods": ["V60", "Chemex", "AeroPress"],
+            "difficulty": "Low",
+            "equipment_required": "Digital scale, second vessel for dilution water",
+            "time_added_s": 30
+        }
+    },
+    {
+        "node_type": "BrewingTechnique",
+        "name": "Japanese Ice Method",
+        "properties": {
+            "full_name": "Japanese Iced Coffee / Flash Brew",
+            "purpose": "Brew hot coffee directly onto ice for instant chilling. Preserves aromatics lost in cold brew's slow cold steep",
+            "applies_to_methods": ["V60", "Chemex"],
+            "difficulty": "Low — adjust brew ratio (brew at 1:10) to account for ice melt",
+            "equipment_required": "Ice, adjusted brew recipe",
+            "time_added_s": 0
+        }
+    },
+    {
+        "node_type": "BrewingTechnique",
+        "name": "Blooming AeroPress",
+        "properties": {
+            "full_name": "Blooming AeroPress Method",
+            "purpose": "Allow 30-45s pre-infusion (bloom) before adding remaining water, degassing CO2 for more even extraction",
+            "applies_to_methods": ["AeroPress"],
+            "difficulty": "Low",
+            "equipment_required": "Standard AeroPress",
+            "time_added_s": 40
+        }
+    },
+
+    # =========================================================================
+    # SENSORY DESCRIPTORS (4)
+    # Why add these: Books discuss chemistry directly. When a source says
+    # 'chlorogenic acids cause astringency' that's a CAUSES edge.
+    # Without SensoryDescriptor nodes, that knowledge has nowhere to live.
+    # =========================================================================
+    {
+        "node_type": "SensoryDescriptor",
+        "name": "Malic Acid",
+        "properties": {
+            "chemical_name": "2-hydroxysuccinic acid",
+            "chemical_class": "Organic acid",
+            "perception": "Tart, green apple, lemon — a clean mid-range acidity",
+            "concentration_in_coffee_ppm": "Moderate (150-300mg/L in brewed coffee)",
+            "affected_by_roast": "Partially degrades; highest in light roasts and washed coffees",
+            "primary_sources": ["Ethiopian washed", "Kenyan", "Colombian high-altitude"]
+        }
+    },
+    {
+        "node_type": "SensoryDescriptor",
+        "name": "Citric Acid",
+        "properties": {
+            "chemical_name": "2-hydroxypropane-1,2,3-tricarboxylic acid",
+            "chemical_class": "Organic acid",
+            "perception": "Bright, clean orange/lemon citrus — the most common coffee acid",
+            "concentration_in_coffee_ppm": "High (200-500mg/L in brewed coffee)",
+            "affected_by_roast": "Degrades significantly with roast development; dominant in light roasts",
+            "primary_sources": ["Most high-altitude washed Arabica"]
+        }
+    },
+    {
+        "node_type": "SensoryDescriptor",
+        "name": "Phosphoric Acid",
+        "properties": {
+            "chemical_name": "Orthophosphoric acid",
+            "chemical_class": "Inorganic acid",
+            "perception": "Very clean, transparent brightness without specific citrus character",
+            "concentration_in_coffee_ppm": "Low (traces, but perceptually significant)",
+            "affected_by_roast": "Relatively stable through light-medium roasting",
+            "primary_sources": ["Washed Ethiopian high-altitude", "Some Kenyan AA"]
+        }
+    },
+    {
+        "node_type": "SensoryDescriptor",
+        "name": "Chlorogenic Acid",
+        "properties": {
+            "chemical_name": "3-O-caffeoylquinic acid (primary isomer)",
+            "chemical_class": "Polyphenol",
+            "perception": "Astringent, dry, slightly bitter at high concentrations",
+            "concentration_in_coffee_ppm": "Very high in green coffee (6-10% dry weight); reduces 50-70% by medium roast",
+            "affected_by_roast": "Degrades substantially — nearly absent in dark roasts",
+            "primary_sources": ["All coffees — highest in under-roasted or light roasts"]
+        }
+    },
+
+    # =========================================================================
+    # EXPERTS (4)
+    # Why model experts as nodes: When books disagree, CONFLICTS_WITH edges
+    # between BrewingRules need SOURCED_FROM edges to say *who* holds each
+    # position. Without Expert nodes, conflicting claims collapse into one truth.
+    # =========================================================================
+    {
+        "node_type": "Expert",
+        "name": "Scott Rao",
+        "properties": {
+            "full_name": "Scott Rao",
+            "credentials": "Coffee consultant, roaster, barista trainer",
+            "primary_works": ["The Professional Barista's Handbook (2008)", "The Coffee Roaster's Companion (2014)"],
+            "organisation": "Independent",
+            "known_for": "Quantitative approach to espresso and roasting; popularised WDT, Rao Spin, extraction yield measurement"
+        }
+    },
+    {
+        "node_type": "Expert",
+        "name": "James Hoffmann",
+        "properties": {
+            "full_name": "James Hoffmann",
+            "credentials": "2007 World Barista Champion, author, coffee educator",
+            "primary_works": ["The World Atlas of Coffee (2014)", "How to Make the Best Coffee in Your Home (2022)"],
+            "organisation": "Square Mile Coffee Roasters (co-founder)",
+            "known_for": "Accessible coffee education, bypass dilution, French press no-stir method"
+        }
+    },
+    {
+        "node_type": "Expert",
+        "name": "SCA",
+        "properties": {
+            "full_name": "Specialty Coffee Association",
+            "credentials": "Global trade body defining specialty coffee standards",
+            "primary_works": ["SCA Brewing Standards", "SCA Cupping Protocols", "Coffee Taster's Flavor Wheel"],
+            "organisation": "Non-profit trade association",
+            "known_for": "Golden Cup Standard (1:15-1:17, 90-96°C), grading standards, barista skills curriculum"
+        }
+    },
+    {
+        "node_type": "Expert",
+        "name": "World Barista Championship",
+        "properties": {
+            "full_name": "World Barista Championship",
+            "credentials": "Annual global competition judged by certified SCA judges",
+            "primary_works": ["WBC Rules and Regulations (updated annually)", "WBC Scoresheet"],
+            "organisation": "World Coffee Events / SCA",
+            "known_for": "Competition-level espresso standards: 1:2 dose-to-yield, 25-35s extraction window"
+        }
+    },
+
+    # =========================================================================
+    # ADDITIONAL BREWING RULE — demonstrates CONFLICTS_WITH
+    # Bypass Dilution conflicts with Golden Ratio not because one is wrong,
+    # but because they represent different philosophies. Modelling the conflict
+    # is more honest than silently picking one.
+    # =========================================================================
+    {
+        "node_type": "BrewingRule",
+        "name": "Bypass Dilution for Clarity",
+        "properties": {
+            "description": "Brew filter coffee at 1:8-1:10 concentration, then add hot water to reach target strength (1:14-1:17). The denser brew bed extracts more evenly; dilution achieves target TDS without over-extracting outer grounds.",
+            "dictates": {
+                "parameter": "brew_ratio",
+                "direction": "concentrate_then_dilute",
+                "value_range": "1:8-1:10 brew, dilute to 1:14-1:17",
+                "unit": "g coffee per g water"
+            },
+            "pid_specificity": {
+                "requires_pid": None,
+                "reason": "Bypass dilution is ratio and volume management; independent of temperature precision equipment.",
+                "non_pid_alternative": "Boil a second kettle for dilution water. Weigh both brew output and added dilution water on a 0.1g scale to hit your target TDS."
+            },
+            "confidence": 0.82,
+            "evidence": "James Hoffmann — The World Atlas of Coffee; YouTube: The Bypass Method"
+        }
+    },
+
     # BREWING RULES (8)
     # Each rule MUST carry: description, dictates, pid_specificity, confidence, evidence
     # non_pid_alternative MUST be an actionable workaround — never a restriction
@@ -855,4 +1253,133 @@ EDGE_DEFINITIONS = [
      "properties": {"source": "Specialty Coffee Curation", "confidence": 0.87, "evidence": "French Press full-immersion and metal filter complement Indonesian earthy, full-body profile"}},
     {"source": ("Origin", "Colombia"), "target": ("BrewMethod", "AeroPress"), "relationship": "PAIRS_WITH",
      "properties": {"source": "Specialty Coffee Curation", "confidence": 0.85, "evidence": "Colombian balanced profile adapts well to AeroPress versatility across ratios and temps"}},
+
+    # =========================================================================
+    # NEW EDGES — using the 8 new relationship types
+    # =========================================================================
+
+    # --- SUB_REGION_OF: geographic hierarchy ---
+    # Every Region must have exactly one SUB_REGION_OF edge to its parent.
+    # This enables queries like "what regions are within Ethiopia?" by
+    # traversing inbound SUB_REGION_OF edges on the Origin node.
+    {"source": ("Region", "Yirgacheffe"), "target": ("Origin", "Ethiopia"), "relationship": "SUB_REGION_OF",
+     "properties": {"source": "World Atlas of Coffee", "confidence": 0.99, "evidence": "Yirgacheffe is a woreda within the SNNPR of Ethiopia"}},
+    {"source": ("Region", "Sidama"), "target": ("Origin", "Ethiopia"), "relationship": "SUB_REGION_OF",
+     "properties": {"source": "World Atlas of Coffee", "confidence": 0.99, "evidence": "Sidama is a regional state in southern Ethiopia"}},
+    {"source": ("Region", "Huila"), "target": ("Origin", "Colombia"), "relationship": "SUB_REGION_OF",
+     "properties": {"source": "World Atlas of Coffee", "confidence": 0.99, "evidence": "Huila is a department in the Andean coffee region of Colombia"}},
+    {"source": ("Region", "Cerrado"), "target": ("Origin", "Brazil"), "relationship": "SUB_REGION_OF",
+     "properties": {"source": "World Atlas of Coffee", "confidence": 0.99, "evidence": "Cerrado Mineiro is a defined coffee-producing region in Minas Gerais, Brazil"}},
+    {"source": ("Region", "Antigua"), "target": ("Origin", "Guatemala"), "relationship": "SUB_REGION_OF",
+     "properties": {"source": "World Atlas of Coffee", "confidence": 0.99, "evidence": "Antigua is a coffee-producing region in Sacatepéquez department, Guatemala"}},
+
+    # --- GROWN_IN: cultivar geography ---
+    # One cultivar can have multiple GROWN_IN edges. The cup profile differs
+    # per terroir — that nuance lives in the edge properties, not the Cultivar node.
+    {"source": ("Cultivar", "Gesha"), "target": ("Origin", "Ethiopia"), "relationship": "GROWN_IN",
+     "properties": {"source": "Scott Rao — Coffee Roaster's Companion", "confidence": 0.97, "evidence": "Gesha originated in the Gesha village, Kaffa zone, Ethiopia"}},
+    {"source": ("Cultivar", "SL28"), "target": ("Origin", "Kenya"), "relationship": "GROWN_IN",
+     "properties": {"source": "World Atlas of Coffee", "confidence": 0.98, "evidence": "SL28 is almost exclusively grown in Kenya; occasionally in other East African origins"}},
+    {"source": ("Cultivar", "Bourbon"), "target": ("Origin", "Colombia"), "relationship": "GROWN_IN",
+     "properties": {"source": "World Atlas of Coffee", "confidence": 0.92, "evidence": "Bourbon is widely cultivated across Colombian coffee farms alongside Castillo and Caturra"}},
+    {"source": ("Cultivar", "Bourbon"), "target": ("Origin", "Guatemala"), "relationship": "GROWN_IN",
+     "properties": {"source": "World Atlas of Coffee", "confidence": 0.93, "evidence": "Bourbon and Typica are the historic cultivars of Guatemalan specialty coffee"}},
+    {"source": ("Cultivar", "Catuai"), "target": ("Origin", "Brazil"), "relationship": "GROWN_IN",
+     "properties": {"source": "World Atlas of Coffee", "confidence": 0.96, "evidence": "Catuai is the dominant cultivar planted across most Brazilian coffee-growing regions"}},
+
+    # --- TYPICAL_FLAVOR from Cultivars and Regions ---
+    # These are more specific than Origin → TYPICAL_FLAVOR because they pin
+    # the flavor to a specific genetic line or terroir, not the whole country.
+    {"source": ("Cultivar", "Gesha"), "target": ("FlavorNote", "Jasmine"), "relationship": "TYPICAL_FLAVOR",
+     "properties": {"source": "SCA Flavor Wheel / Competition records", "confidence": 0.96, "evidence": "Jasmine aroma is the single most cited characteristic of Gesha in cupping notes globally"}},
+    {"source": ("Cultivar", "Gesha"), "target": ("FlavorNote", "Rose"), "relationship": "TYPICAL_FLAVOR",
+     "properties": {"source": "SCA Flavor Wheel", "confidence": 0.88, "evidence": "Rose is frequently noted alongside jasmine in Gesha — both are linalool-driven floral aromatics"}},
+    {"source": ("Cultivar", "SL28"), "target": ("FlavorNote", "Blackcurrant"), "relationship": "TYPICAL_FLAVOR",
+     "properties": {"source": "World Atlas of Coffee", "confidence": 0.95, "evidence": "Blackcurrant is considered the signature taste marker of SL28 across all Kenyan growing regions"}},
+    {"source": ("Region", "Yirgacheffe"), "target": ("FlavorNote", "Jasmine"), "relationship": "TYPICAL_FLAVOR",
+     "properties": {"source": "World Atlas of Coffee", "confidence": 0.94, "evidence": "Washed Yirgacheffe is the global reference for jasmine-forward coffee"}},
+    {"source": ("Region", "Yirgacheffe"), "target": ("FlavorNote", "Lemon"), "relationship": "TYPICAL_FLAVOR",
+     "properties": {"source": "World Atlas of Coffee", "confidence": 0.91, "evidence": "High citric acid expression is characteristic of high-altitude Yirgacheffe washed lots"}},
+    {"source": ("Region", "Sidama"), "target": ("FlavorNote", "Blueberry"), "relationship": "TYPICAL_FLAVOR",
+     "properties": {"source": "World Atlas of Coffee", "confidence": 0.88, "evidence": "Sidama naturals are known for jammy blueberry notes, often compared to Yirgacheffe but heavier"}},
+    {"source": ("Region", "Huila"), "target": ("FlavorNote", "Caramel"), "relationship": "TYPICAL_FLAVOR",
+     "properties": {"source": "World Atlas of Coffee", "confidence": 0.87, "evidence": "Huila washed coffees consistently show clean caramel sweetness with tropical fruit undertones"}},
+
+    # --- CAUSES: defect cascade and chemistry-to-defect ---
+    # These edges are what the diagnosis engine traverses when a shot tastes wrong.
+    # Channeling → Astringency: channeling creates over-extracted pockets
+    # that read as astringent dryness.
+    {"source": ("Defect", "Channeling"), "target": ("Defect", "Astringency"), "relationship": "CAUSES",
+     "properties": {"source": "Scott Rao — The Professional Barista's Handbook", "confidence": 0.91, "evidence": "Channeling produces locally over-extracted streams; the phenolic compounds in those areas register as astringency"}},
+    # Chlorogenic Acid → Astringency: the chemistry underpinning why under-roasted
+    # or very light roast coffees can taste harsh.
+    {"source": ("SensoryDescriptor", "Chlorogenic Acid"), "target": ("Defect", "Astringency"), "relationship": "CAUSES",
+     "properties": {"source": "Rao — Coffee Roaster's Companion; SCA Research", "confidence": 0.88, "evidence": "Chlorogenic acids at high concentrations (under-roasted coffee) bind salivary proteins, causing the dry astringent mouthfeel"}},
+    # Sour Ferment → Earthy: fermentation-gone-wrong introduces microbial
+    # compounds that often read as earthy or musty rather than clean fruit.
+    {"source": ("Defect", "Sour Ferment"), "target": ("FlavorNote", "Earthy"), "relationship": "CAUSES",
+     "properties": {"source": "SCA Green Coffee Processing Module", "confidence": 0.78, "evidence": "Over-fermentation introduces Bacillus and mould compounds that often co-present as earthy mustiness alongside the vinegar note"}},
+
+    # --- PREVENTS: technique/rule → defect mitigation ---
+    # WDT is the primary mechanical fix for channeling.
+    # Bloom Pre-Infusion prevents Grassy by ensuring the full brew water
+    # contacts the grounds (un-bloomed brews often taste flat or raw).
+    {"source": ("BrewingTechnique", "WDT"), "target": ("Defect", "Channeling"), "relationship": "PREVENTS",
+     "properties": {"source": "Scott Rao — The Professional Barista's Handbook", "confidence": 0.93, "evidence": "WDT physically disrupts clumps that create preferential flow paths; the most widely recommended channeling prevention technique"}},
+    {"source": ("BrewingRule", "Bloom Pre-Infusion"), "target": ("Defect", "Grassy"), "relationship": "PREVENTS",
+     "properties": {"source": "SCA Brewing Standards; Barista Hustle", "confidence": 0.80, "evidence": "Proper bloom fully wets the coffee bed; skipping bloom in fresh coffee causes CO2 pockets that result in uneven, under-extracted (grassy) patches"}},
+
+    # --- REFINES: technique → method ---
+    # REFINES is directional: the technique is a specialisation that improves
+    # the method. The method still works without the technique — the technique
+    # just makes it better.
+    {"source": ("BrewingTechnique", "WDT"), "target": ("BrewMethod", "Espresso"), "relationship": "REFINES",
+     "properties": {"source": "Scott Rao — The Professional Barista's Handbook", "confidence": 0.94, "evidence": "WDT is an espresso-specific puck prep step that improves consistency by preventing channeling"}},
+    {"source": ("BrewingTechnique", "Rao Spin"), "target": ("BrewMethod", "Espresso"), "relationship": "REFINES",
+     "properties": {"source": "Scott Rao", "confidence": 0.85, "evidence": "Post-pull cup agitation integrates crema stratification, producing a more uniform sweetness-forward flavour"}},
+    {"source": ("BrewingTechnique", "Japanese Ice Method"), "target": ("BrewMethod", "V60"), "relationship": "REFINES",
+     "properties": {"source": "James Hoffmann — World Atlas of Coffee", "confidence": 0.88, "evidence": "Flash-chilling onto ice preserves volatile aromatics while achieving cold serving temp; V60 is the most common vessel for this technique"}},
+    {"source": ("BrewingTechnique", "Bypass Brewing"), "target": ("BrewMethod", "V60"), "relationship": "REFINES",
+     "properties": {"source": "James Hoffmann", "confidence": 0.83, "evidence": "Bypass dilution applied to V60 improves extraction evenness at the expense of slightly more complexity versus direct-ratio brewing"}},
+    {"source": ("BrewingTechnique", "Blooming AeroPress"), "target": ("BrewMethod", "AeroPress"), "relationship": "REFINES",
+     "properties": {"source": "World AeroPress Championship community recipes", "confidence": 0.87, "evidence": "Adding a bloom phase to AeroPress degasses CO2, improving even extraction across the puck"}},
+
+    # --- SOURCED_FROM: provenance tracking ---
+    # Every rule or technique from a book gets a SOURCED_FROM edge.
+    # This is what lets the system say 'according to Scott Rao...' rather than
+    # presenting all knowledge as equally authoritative.
+    {"source": ("BrewingTechnique", "WDT"), "target": ("Expert", "Scott Rao"), "relationship": "SOURCED_FROM",
+     "properties": {"source": "attribution", "confidence": 0.95, "evidence": "Scott Rao popularised and named WDT in the specialty community"}},
+    {"source": ("BrewingTechnique", "Rao Spin"), "target": ("Expert", "Scott Rao"), "relationship": "SOURCED_FROM",
+     "properties": {"source": "attribution", "confidence": 0.99, "evidence": "Rao Spin is named directly after Scott Rao who described and promoted the technique"}},
+    {"source": ("BrewingTechnique", "Bypass Brewing"), "target": ("Expert", "James Hoffmann"), "relationship": "SOURCED_FROM",
+     "properties": {"source": "attribution", "confidence": 0.90, "evidence": "James Hoffmann is the most prominent advocate of bypass dilution for filter clarity"}},
+    {"source": ("BrewingRule", "Bypass Dilution for Clarity"), "target": ("Expert", "James Hoffmann"), "relationship": "SOURCED_FROM",
+     "properties": {"source": "attribution", "confidence": 0.90, "evidence": "The bypass dilution rule is sourced from Hoffmann's published methodology"}},
+    {"source": ("BrewingRule", "High Temp for Light Roast"), "target": ("Expert", "SCA"), "relationship": "SOURCED_FROM",
+     "properties": {"source": "attribution", "confidence": 0.93, "evidence": "SCA Brewing Standards specify 90-96°C as the target range for filter brewing, with higher end recommended for light roasts"}},
+    {"source": ("BrewingRule", "Espresso Extraction Window"), "target": ("Expert", "World Barista Championship"), "relationship": "SOURCED_FROM",
+     "properties": {"source": "attribution", "confidence": 0.97, "evidence": "WBC judging criteria define 25-35s as the acceptable espresso extraction window"}},
+
+    # --- CONFLICTS_WITH: honest disagreement ---
+    # Bypass Dilution for Clarity vs. Golden Ratio is a genuine philosophical
+    # conflict: brew-to-target TDS directly (Golden Ratio) vs.
+    # brew-strong-then-dilute (Bypass). Both produce good coffee.
+    # Recording the conflict lets the system present both options rather than
+    # arbitrarily picking one as 'correct'.
+    {"source": ("BrewingRule", "Bypass Dilution for Clarity"), "target": ("BrewingRule", "Golden Ratio"), "relationship": "CONFLICTS_WITH",
+     "properties": {"source": "comparative analysis", "confidence": 0.80,
+                    "evidence": "Golden Ratio brews directly to target ratio (1:15-1:17). Bypass Dilution brews at 1:8-1:10 then dilutes. Both reach similar TDS but via different processes, producing different extraction dynamics and flavour profiles."}},
+
+    # --- MANIFESTS_AS: chemistry → perception ---
+    # These edges are what allow the system to answer 'why does this coffee
+    # taste like lemon?' with a traceable chemical explanation.
+    {"source": ("SensoryDescriptor", "Malic Acid"), "target": ("FlavorNote", "Lemon"), "relationship": "MANIFESTS_AS",
+     "properties": {"source": "SCA Sensory Lexicon; Rao — Coffee Roaster's Companion", "confidence": 0.88, "evidence": "Malic acid is the primary contributor to tart apple-lemon acidity in washed high-altitude coffees"}},
+    {"source": ("SensoryDescriptor", "Citric Acid"), "target": ("FlavorNote", "Orange"), "relationship": "MANIFESTS_AS",
+     "properties": {"source": "SCA Sensory Lexicon", "confidence": 0.91, "evidence": "Citric acid produces the clean orange-citrus brightness that is the most common perceived acidity type in Arabica"}},
+    {"source": ("SensoryDescriptor", "Phosphoric Acid"), "target": ("FlavorNote", "Lemon"), "relationship": "MANIFESTS_AS",
+     "properties": {"source": "SCA Research; Maxwell Colonna-Dashwood — Water for Coffee", "confidence": 0.82, "evidence": "Phosphoric acid contributes a very clean, transparent acidity that presents as bright lemon or citrus clarity without specific fruit character"}},
+    {"source": ("SensoryDescriptor", "Chlorogenic Acid"), "target": ("FlavorNote", "Earthy"), "relationship": "MANIFESTS_AS",
+     "properties": {"source": "Rao — Coffee Roaster's Companion", "confidence": 0.75, "evidence": "At high concentrations (very light or under-roasted coffees), chlorogenic acids contribute a green, earthy astringency alongside their bitterness"}},
 ]
