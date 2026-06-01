@@ -1188,55 +1188,21 @@ def ask(query: str) -> str:
     try:
         parts: list[str] = []
 
-        # 1. Classify intent first so the format instruction leads the response
+        # 1. Classify intent
         intent = _classify_intent(query)
 
-        # 2. Format instruction — MUST come before any data so it frames
-        #    how the LLM reads the retrieval results that follow.
-        no_markdown = (
-            "PLAIN TEXT ONLY — the app does not render markdown. "
-            "Do not use #, ##, **, *, --, > or any other markdown syntax."
+        # 2. Light style guide — no templates, just the hard constraints.
+        #    Bean decides the format; we only enforce plain text and accuracy rules.
+        parts.append(
+            "── STYLE GUIDE ──\n"
+            "Plain text only — the app does not render markdown. "
+            "Do not use #, ##, **, *, --, > or any other markdown syntax.\n"
+            "Be concise (under 150 words). Write like a knowledgeable friend.\n"
+            "Ground every claim in the retrieved data below — use the exact node names "
+            "(PhysicsModel, BrewParameter, Defect, etc.) rather than paraphrasing them.\n"
+            "If SOURCED_FROM edges appear in the data, end with: Source: [expert or paper name]\n"
+            "Never fabricate a citation. If no source is in the data, omit the Source line."
         )
-        if intent in ("brewing", "diagnosis"):
-            parts.append(
-                f"── RESPONSE FORMAT (read this before the data below) ──\n{no_markdown}\n\n"
-                "Use this layout — and only this layout:\n\n"
-                "WHY THIS HAPPENS  ·  [specific PhysicsModel or defect name from the data below]\n"
-                "[One sentence: the physical mechanism + what the barista tastes. Be concrete.]\n\n\n"
-                "WHAT TO DO\n\n"
-                "[Setting name] — [specific number, click count, or range]\n"
-                "[What physically changes + what the barista tastes when correct.]\n\n"
-                "[Setting name] — [specific number, click count, or range]\n"
-                "[What physically changes + what the barista tastes when correct.]\n\n"
-                "[Optional third adjustment. Omit if not needed.]\n\n\n"
-                "[One original metaphor from physics or texture. Never fruit, doors, or sponges.]\n\n"
-                "YOU'LL KNOW IT'S WORKING WHEN [one sensory cue without equipment].\n\n"
-                "If SOURCED_FROM edges appear in the data, add: Source: [expert or paper]\n"
-                "Hard limit: 160 words."
-            )
-        elif intent == "knowledge":
-            parts.append(
-                f"── RESPONSE FORMAT (read this before the data below) ──\n{no_markdown}\n\n"
-                "THIS IS AN EXPLANATORY QUESTION. "
-                "Do NOT use WHY THIS HAPPENS, WHAT TO DO, or YOU'LL KNOW IT'S WORKING WHEN. "
-                "Do not use any template headers at all.\n\n"
-                "Write plain prose only:\n"
-                "Sentence 1: direct answer to exactly what was asked.\n"
-                "Sentences 2-4: expand on the mechanism using the node names from the data below "
-                "(PhysicsModel name, BrewParameter name, etc.).\n"
-                "Final sentence: one practical implication for the barista.\n\n"
-                "If SOURCED_FROM edges appear in the data, close with: Source: [expert or paper]\n"
-                "Hard limit: 120 words. No bullets. No headers."
-            )
-        elif intent == "recommendation":
-            parts.append(
-                f"── RESPONSE FORMAT (read this before the data below) ──\n{no_markdown}\n\n"
-                "THIS IS A RECOMMENDATION. Do NOT use WHY THIS HAPPENS or any diagnosis template.\n\n"
-                "Lead with the top pick and a one-sentence reason from the VFM data.\n"
-                "List up to three options, each on its own line:\n"
-                "[Bean name] — [score]/10  ·  [one-line reason]\n\n"
-                "Close with one sentence on what to try next. Hard limit: 120 words."
-            )
 
         # 3. User context
         parts.append(_get_user_context())
