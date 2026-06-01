@@ -1188,13 +1188,60 @@ def ask(query: str) -> str:
     try:
         parts: list[str] = []
 
-        # 1. User context — always first
-        parts.append(_get_user_context())
-
-        # 2. Classify intent
+        # 1. Classify intent first so the format instruction leads the response
         intent = _classify_intent(query)
 
-        # 3. Unified retrieval (entity + vector + graph enrichment)
+        # 2. Format instruction — MUST come before any data so it frames
+        #    how the LLM reads the retrieval results that follow.
+        no_markdown = (
+            "PLAIN TEXT ONLY — the app does not render markdown. "
+            "Do not use #, ##, **, *, --, > or any other markdown syntax."
+        )
+        if intent in ("brewing", "diagnosis"):
+            parts.append(
+                f"── RESPONSE FORMAT (read this before the data below) ──\n{no_markdown}\n\n"
+                "Use this layout — and only this layout:\n\n"
+                "WHY THIS HAPPENS  ·  [specific PhysicsModel or defect name from the data below]\n"
+                "[One sentence: the physical mechanism + what the barista tastes. Be concrete.]\n\n\n"
+                "WHAT TO DO\n\n"
+                "[Setting name] — [specific number, click count, or range]\n"
+                "[What physically changes + what the barista tastes when correct.]\n\n"
+                "[Setting name] — [specific number, click count, or range]\n"
+                "[What physically changes + what the barista tastes when correct.]\n\n"
+                "[Optional third adjustment. Omit if not needed.]\n\n\n"
+                "[One original metaphor from physics or texture. Never fruit, doors, or sponges.]\n\n"
+                "YOU'LL KNOW IT'S WORKING WHEN [one sensory cue without equipment].\n\n"
+                "If SOURCED_FROM edges appear in the data, add: Source: [expert or paper]\n"
+                "Hard limit: 160 words."
+            )
+        elif intent == "knowledge":
+            parts.append(
+                f"── RESPONSE FORMAT (read this before the data below) ──\n{no_markdown}\n\n"
+                "THIS IS AN EXPLANATORY QUESTION. "
+                "Do NOT use WHY THIS HAPPENS, WHAT TO DO, or YOU'LL KNOW IT'S WORKING WHEN. "
+                "Do not use any template headers at all.\n\n"
+                "Write plain prose only:\n"
+                "Sentence 1: direct answer to exactly what was asked.\n"
+                "Sentences 2-4: expand on the mechanism using the node names from the data below "
+                "(PhysicsModel name, BrewParameter name, etc.).\n"
+                "Final sentence: one practical implication for the barista.\n\n"
+                "If SOURCED_FROM edges appear in the data, close with: Source: [expert or paper]\n"
+                "Hard limit: 120 words. No bullets. No headers."
+            )
+        elif intent == "recommendation":
+            parts.append(
+                f"── RESPONSE FORMAT (read this before the data below) ──\n{no_markdown}\n\n"
+                "THIS IS A RECOMMENDATION. Do NOT use WHY THIS HAPPENS or any diagnosis template.\n\n"
+                "Lead with the top pick and a one-sentence reason from the VFM data.\n"
+                "List up to three options, each on its own line:\n"
+                "[Bean name] — [score]/10  ·  [one-line reason]\n\n"
+                "Close with one sentence on what to try next. Hard limit: 120 words."
+            )
+
+        # 3. User context
+        parts.append(_get_user_context())
+
+        # 4. Unified retrieval (entity + vector + graph enrichment)
         retrieval = _unified_search(query)
         parts.append(f"── KNOWLEDGE RETRIEVAL ──\n{retrieval}")
 
@@ -1310,55 +1357,6 @@ def ask(query: str) -> str:
         # ── Intent-aware format instruction ──────────────────────────────────
         # Plain text only — the app does not render markdown.
         # Each intent gets a format matched to what the question actually is.
-        no_markdown = (
-            "PLAIN TEXT ONLY — the app does not render markdown. "
-            "Do not use #, ##, **, *, --, > or any other markdown syntax."
-        )
-
-        if intent in ("brewing", "diagnosis"):
-            parts.append(
-                f"── RESPONSE FORMAT ──\n{no_markdown}\n\n"
-                "Use this layout — and only this layout — for diagnosis and brewing questions:\n\n"
-                "WHY THIS HAPPENS  ·  [name the specific PhysicsModel or defect from the retrieval above]\n"
-                "[One sentence: the physical mechanism + what the barista actually tastes. "
-                "Be concrete — name the compound, the pore network, or the flow behaviour.]\n\n\n"
-                "WHAT TO DO\n\n"
-                "[Setting name] — [specific number, click count, or range]\n"
-                "[One line: the physical change this makes + what the barista tastes when correct.]\n\n"
-                "[Setting name] — [specific number, click count, or range]\n"
-                "[One line: the physical change this makes + what the barista tastes when correct.]\n\n"
-                "[Optional third adjustment — same format. Omit if not needed.]\n\n\n"
-                "[One original metaphor drawn from physics or texture. Never use fruit, doors, or sponges. "
-                "Write it as a plain sentence, no punctuation around it.]\n\n"
-                "YOU'LL KNOW IT'S WORKING WHEN [one specific sensory cue — something the barista "
-                "can see or feel without equipment].\n\n"
-                "If SOURCED_FROM edges appear above, add: Source: [expert or paper]\n"
-                "Otherwise omit Source entirely. Hard limit: 160 words."
-            )
-        elif intent == "knowledge":
-            parts.append(
-                f"── RESPONSE FORMAT ──\n{no_markdown}\n\n"
-                "This is an explanatory question — do NOT use the WHY THIS HAPPENS / WHAT TO DO template.\n\n"
-                "Write a natural, conversational answer in plain prose. Structure it as:\n"
-                "1. A direct one-sentence answer to exactly what was asked.\n"
-                "2. Two or three sentences expanding on the mechanism or concept, "
-                "grounded in the retrieved nodes above — name the PhysicsModel, BrewParameter, "
-                "or SensoryDescriptor by name.\n"
-                "3. One practical implication for the barista (one sentence).\n\n"
-                "If SOURCED_FROM edges appear above, close with: Source: [expert or paper]\n"
-                "Hard limit: 120 words. No bullet points. No headers. Write like a knowledgeable friend."
-            )
-        elif intent == "recommendation":
-            parts.append(
-                f"── RESPONSE FORMAT ──\n{no_markdown}\n\n"
-                "This is a recommendation — do NOT use the WHY THIS HAPPENS template.\n\n"
-                "Lead with the top pick and a one-sentence reason grounded in the VFM data above. "
-                "Then list up to three options, each on its own line as:\n"
-                "[Bean name] — [score]/10  ·  [one-line reason it suits this person's history]\n\n"
-                "Close with one sentence on what to try next with the top pick. "
-                "Hard limit: 120 words. No markdown."
-            )
-
         return "\n\n".join(p for p in parts if p.strip())
 
     except Exception as e:
