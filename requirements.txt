@@ -4,3 +4,4 @@ uvicorn==0.46.0
 supabase==2.29.0
 python-dotenv==1.2.2
 openai==2.38.0
+pypdf==5.1.0
