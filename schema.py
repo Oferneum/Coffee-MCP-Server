@@ -101,10 +101,16 @@ NODE_TYPES: dict[str, dict] = {
         "description": (
             "A measurable variable in the brewing process. BrewingRules DICTATE "
             "target values for BrewParameters. Connecting a rule to a parameter "
-            "makes the parameter machine-readable for the diagnosis engine."
+            "makes the parameter machine-readable for the diagnosis engine. "
+            "Includes water chemistry parameters such as mineral content and TDS."
         ),
         "key_properties": ["unit", "typical_range", "primary_effect"],
-        "example_names": ["Water Temperature", "Extraction Time", "Brew Ratio", "Grind Size", "Bloom Time", "Yield Ratio"],
+        "example_names": [
+            "Water Temperature", "Extraction Time", "Brew Ratio", "Grind Size",
+            "Bloom Time", "Yield Ratio",
+            "Water Magnesium Content", "Water Calcium Content",
+            "Water TDS", "Water Sodium Content", "Water Hardness",
+        ],
     },
 
     "EquipmentType": {
@@ -206,6 +212,25 @@ NODE_TYPES: dict[str, dict] = {
         "key_properties": ["full_name", "credentials", "primary_works", "organisation"],
         "example_names": ["Scott Rao", "James Hoffmann", "SCA", "World Barista Championship", "Tim Wendelboe"],
     },
+
+    "PhysicsModel": {
+        "description": (
+            "A mathematical or physical model that describes the mechanics of coffee "
+            "extraction, grinding, or fluid flow. Use for named models from scientific "
+            "literature (Double Porosity Model, Darcy Flow, Diffusion-Limited Extraction) "
+            "rather than for qualitative descriptions. BrewParameters and BrewMethods "
+            "are GOVERNED_BY the PhysicsModel that predicts their behaviour."
+        ),
+        "key_properties": [
+            "model_type", "governing_equation", "key_variables",
+            "predicts", "assumptions", "source_paper",
+        ],
+        "example_names": [
+            "Double Porosity Model", "Darcy Flow Model",
+            "Diffusion-Limited Extraction", "Rao Channeling Model",
+            "Particle Size Distribution Model",
+        ],
+    },
 }
 
 
@@ -269,9 +294,14 @@ RELATIONSHIP_TYPES: dict[str, dict] = {
     },
 
     "PRODUCES": {
-        "description": "An EquipmentType produces this GrindProfile, or a RoastLevel directly produces this FlavorNote compound.",
-        "valid_sources": ["EquipmentType", "RoastLevel"],
-        "valid_targets": ["GrindProfile", "FlavorNote"],
+        "description": (
+            "An EquipmentType or BrewingTechnique produces a GrindProfile; "
+            "a RoastLevel directly produces a FlavorNote compound; "
+            "a GrindProfile characterises a target BrewParameter value; "
+            "a PhysicsModel or BrewParameter produces an observable extraction outcome."
+        ),
+        "valid_sources": ["EquipmentType", "RoastLevel", "BrewingTechnique", "GrindProfile", "PhysicsModel", "BrewParameter"],
+        "valid_targets": ["GrindProfile", "FlavorNote", "BrewParameter", "PhysicsModel"],
         "example": "EquipmentType:Flat Burr Grinder → PRODUCES → GrindProfile:Unimodal",
     },
 
@@ -317,13 +347,14 @@ RELATIONSHIP_TYPES: dict[str, dict] = {
     "CAUSES": {
         "description": (
             "A Defect, SensoryDescriptor at extreme concentration, or brewing "
-            "condition causes this Defect or negative FlavorNote outcome. "
-            "Use for defect cascade chains (Channeling causes Astringency) and "
-            "for chemistry-to-defect links (Chlorogenic Acid causes Astringency "
-            "when under-roasted). This is the primary edge type for the diagnosis engine."
+            "condition causes this Defect, negative FlavorNote, or PhysicsModel "
+            "phenomenon. Use for defect cascade chains (Channeling causes Astringency), "
+            "chemistry-to-defect links, and physical-force-to-outcome links "
+            "(e.g. high flow resistance causes channeling). "
+            "This is the primary edge type for the diagnosis engine."
         ),
-        "valid_sources": ["Defect", "SensoryDescriptor"],
-        "valid_targets": ["Defect", "FlavorNote"],
+        "valid_sources": ["Defect", "SensoryDescriptor", "BrewParameter", "PhysicsModel"],
+        "valid_targets": ["Defect", "FlavorNote", "PhysicsModel"],
         "example": "Defect:Channeling → CAUSES → Defect:Astringency",
     },
 
@@ -358,7 +389,7 @@ RELATIONSHIP_TYPES: dict[str, dict] = {
             "add multiple SOURCED_FROM edges — higher agreement across experts "
             "raises effective confidence."
         ),
-        "valid_sources": ["BrewingRule", "BrewingTechnique", "Defect", "SensoryDescriptor", "Cultivar"],
+        "valid_sources": ["BrewingRule", "BrewingTechnique", "Defect", "SensoryDescriptor", "Cultivar", "PhysicsModel"],
         "valid_targets": ["Expert"],
         "example": "BrewingTechnique:WDT → SOURCED_FROM → Expert:Scott Rao",
     },
@@ -387,6 +418,34 @@ RELATIONSHIP_TYPES: dict[str, dict] = {
         "valid_sources": ["SensoryDescriptor"],
         "valid_targets": ["FlavorNote"],
         "example": "SensoryDescriptor:Malic Acid → MANIFESTS_AS → FlavorNote:Lemon",
+    },
+
+    "TRANSFORMS_TO": {
+        "description": (
+            "A SensoryDescriptor degrades, hydrolyses, or oxidises into another "
+            "SensoryDescriptor through roasting or brewing chemistry. Use this — "
+            "not CAUSES — for compound-to-compound transformation chains "
+            "(e.g. chlorogenic acid hydrolyses to quinic acid + caffeic acid at "
+            "high roast temperatures). CAUSES is reserved for chemistry-to-defect "
+            "or defect-to-defect links."
+        ),
+        "valid_sources": ["SensoryDescriptor"],
+        "valid_targets": ["SensoryDescriptor"],
+        "example": "SensoryDescriptor:Chlorogenic Acid → TRANSFORMS_TO → SensoryDescriptor:Quinic Acid",
+    },
+
+    "GOVERNED_BY": {
+        "description": (
+            "A BrewMethod, BrewParameter, or GrindProfile obeys the constraints or "
+            "predictions of a PhysicsModel. Use when a scientific paper names a "
+            "specific mathematical model that describes the behaviour of an extraction "
+            "variable (e.g. flow rate follows Darcy's law, particle dissolution follows "
+            "the Double Porosity Model). Directed from the physical phenomenon to the "
+            "model that explains it."
+        ),
+        "valid_sources": ["BrewMethod", "BrewParameter", "GrindProfile", "BrewingTechnique"],
+        "valid_targets": ["PhysicsModel"],
+        "example": "BrewParameter:Flow Rate → GOVERNED_BY → PhysicsModel:Darcy Flow Model",
     },
 }
 

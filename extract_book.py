@@ -23,10 +23,11 @@ Usage:
 import os
 import sys
 import json
+import time
 import argparse
 from collections import Counter
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 from supabase import create_client, Client
 
 load_dotenv()
@@ -55,7 +56,7 @@ def load_text(file_path: str) -> str:
             return f.read()
 
 
-def chunk_text(text: str, chunk_size: int = 3000, overlap: int = 300) -> list[str]:
+def chunk_text(text: str, chunk_size: int = 1500, overlap: int = 300) -> list[str]:
     """
     Split text into overlapping word-boundary chunks.
 
@@ -123,8 +124,8 @@ Every BrewingRule node's properties dict MUST contain ALL of these keys exactly:
   },
   "pid_specificity": {
     "requires_pid":        true | false | null,
-    "reason":              "why PID matters or does not for this rule",
-    "non_pid_alternative": "MUST be a concrete actionable workaround — never a restriction or 'you need a PID'"
+    "reason":              "why PID matters or does not for this rule — use null + 'Not applicable' for water chemistry or non-equipment rules",
+    "non_pid_alternative": "MUST be a concrete actionable workaround — never a restriction or 'you need a PID'. Use 'Not applicable' for non-equipment rules."
   },
   "confidence": 0.7-1.0,
   "evidence":   "book title + chapter or page if mentioned in the text"
@@ -155,7 +156,19 @@ RULES:
 6. Be specific with names: "Rao Spin" not "spinning", "WDT" not "distribution".
 7. If the passage contradicts an existing known rule, still extract it — note the
    conflict in the evidence field. Do not omit contradictions.
-8. Extract only high-quality, actionable knowledge. Skip vague or anecdotal text.
+8. Extract only high-quality knowledge. Skip anecdotal opinions and vague marketing
+   language, but DO extract scientific findings — even when expressed in technical
+   terms (binding energies, thermodynamics, particle physics, fluid dynamics). Translate
+   them into actionable BrewingRule, SensoryDescriptor, BrewParameter, or PhysicsModel
+   nodes. For example, "Mg2+ has higher binding energy to coffee organics than Ca2+"
+   becomes a BrewingRule whose dictates target BrewParameter:Water Magnesium Content.
+9. Dissolved ions (Na+, Mg2+, Ca2+) and water minerals are valid SensoryDescriptor
+   nodes. Water mineral concentrations are valid BrewParameter nodes.
+10. Named mathematical or physical models (Double Porosity Model, Darcy Flow, diffusion
+    kinetics) are PhysicsModel nodes. Connect them with GOVERNED_BY edges from the
+    BrewParameter or BrewMethod they describe, and SOURCED_FROM edges to the Expert.
+    Use CAUSES when a physical phenomenon (e.g. high flow resistance) produces a
+    brewing outcome (e.g. channeling).
 
 OUTPUT FORMAT — respond ONLY with valid JSON, no other text:
 {{
@@ -191,29 +204,41 @@ def extract_from_chunk(
 
     print(f"  Chunk {chunk_num}/{total_chunks}  ({len(chunk):,} chars)...", end=" ", flush=True)
 
-    try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            response_format={"type": "json_object"},
-            temperature=0.1,    # low temperature = consistent structured output
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": f"Extract knowledge from this passage:\n\n{chunk}"},
-            ],
-        )
-        raw    = response.choices[0].message.content
-        parsed = json.loads(raw)
-        nodes  = parsed.get("nodes", [])
-        edges  = parsed.get("edges", [])
-        print(f"{len(nodes)} nodes, {len(edges)} edges")
-        return parsed
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            response = openai_client.chat.completions.create(
+                model="gpt-4o",
+                response_format={"type": "json_object"},
+                temperature=0.1,    # low temperature = consistent structured output
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": f"Extract knowledge from this passage:\n\n{chunk}"},
+                ],
+            )
+            raw    = response.choices[0].message.content
+            parsed = json.loads(raw)
+            nodes  = parsed.get("nodes", [])
+            edges  = parsed.get("edges", [])
+            print(f"{len(nodes)} nodes, {len(edges)} edges")
+            return parsed
 
-    except json.JSONDecodeError as e:
-        print(f"✗ JSON error: {e}")
-        return {"nodes": [], "edges": []}
-    except Exception as e:
-        print(f"✗ API error: {e}")
-        return {"nodes": [], "edges": []}
+        except json.JSONDecodeError as e:
+            print(f"✗ JSON error: {e}")
+            return {"nodes": [], "edges": []}
+
+        except RateLimitError:
+            if attempt < max_retries - 1:
+                wait = min(5 * 2 ** attempt, 60)   # 5 → 10 → 20 → 40 → 60s
+                print(f"⏳ rate limited — retrying in {wait}s...", end=" ", flush=True)
+                time.sleep(wait)
+            else:
+                print(f"✗ rate limit (all {max_retries} retries failed)")
+                return {"nodes": [], "edges": []}
+
+        except Exception as e:
+            print(f"✗ API error: {e}")
+            return {"nodes": [], "edges": []}
 
 
 # =============================================================================

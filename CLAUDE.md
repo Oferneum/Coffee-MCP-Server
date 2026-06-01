@@ -41,7 +41,7 @@ RPC function `match_knowledge_nodes` powers pgvector similarity search.
 
 **Always edit `schema.py` first** when adding new node types or relationship types. All other files (`knowledge_graph.py`, `extract_book.py`, `server.py`) import from it.
 
-### Node Types (15 total)
+### Node Types (16 total)
 
 | Type | Description |
 |---|---|
@@ -60,10 +60,11 @@ RPC function `match_knowledge_nodes` powers pgvector similarity search.
 | `GrindProfile` | Particle-size distribution (Unimodal / Bimodal) |
 | `Defect` | Negative quality outcome traceable to a cause |
 | `Expert` | Knowledge authority for provenance tracking via `SOURCED_FROM` edges |
+| `PhysicsModel` | Named mathematical model describing extraction, flow, or grinding mechanics |
 
-### Relationship Types (18 total)
+### Relationship Types (20 total)
 
-`TYPICAL_FLAVOR`, `PRODUCES_FLAVOR`, `EMPHASIZES`, `ENHANCES`, `SUPPRESSES`, `PRODUCES`, `DICTATES`, `APPLIES_TO`, `SUGGESTS_TEMP`, `PAIRS_WITH`, `SUB_REGION_OF`, `GROWN_IN`, `CAUSES`, `PREVENTS`, `REFINES`, `SOURCED_FROM`, `CONFLICTS_WITH`, `MANIFESTS_AS`
+`TYPICAL_FLAVOR`, `PRODUCES_FLAVOR`, `EMPHASIZES`, `ENHANCES`, `SUPPRESSES`, `PRODUCES`, `DICTATES`, `APPLIES_TO`, `SUGGESTS_TEMP`, `PAIRS_WITH`, `SUB_REGION_OF`, `GROWN_IN`, `CAUSES`, `PREVENTS`, `REFINES`, `SOURCED_FROM`, `CONFLICTS_WITH`, `MANIFESTS_AS`, `TRANSFORMS_TO`, `GOVERNED_BY`
 
 ### BrewingRule JSONB Contract
 
