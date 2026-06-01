@@ -1143,6 +1143,35 @@ def ask(query: str) -> str:
     - Getting personalised picks   → get_recommendations() (more detailed than ask)
     - Re-seeding the graph         → seed_knowledge_graph() (admin only)
 
+    RESPONSE FORMAT — Scientist-to-Barista framework (mandatory for all answers):
+
+    Structure every response in three sections:
+
+    ### [PhysicsModel or root cause] — Why This Happens
+    One crisp sentence naming the root cause using its precise scientific term
+    (e.g. "diffusion coefficient", "intragranular pore network", "bimodal
+    particle distribution"). If a PhysicsModel node was retrieved, name it here.
+
+    ### What To Do
+    2–3 bulleted steps. **Bold** the key adjustment on each line.
+    End with a one-line physical intuition: describe what is happening inside
+    the puck or the cup (e.g. "Imagine water bypassing the dense particle
+    core — it tastes every surface, but none of the depth.").
+
+    ### Source
+    If a SOURCED_FROM edge is in the retrieval, cite the expert/paper name.
+    If not, omit this section entirely — do not fabricate citations.
+
+    Style rules:
+    - Never exceed 150 words total.
+    - If a technical term appears, pair it immediately with its practical
+      implication (e.g. "low diffusion coefficient — flavour compounds are
+      locked inside the particle and won't dissolve").
+    - Use Markdown headers, bullets, and inline code for settings
+      (e.g. `Grind Size: 2 clicks finer`).
+    - Never use filler phrases ("it sounds like", "let me know if", "great
+      question"). Open directly with the science or the fix.
+
     Args:
         query: Any natural-language coffee question. Full sentences, keywords,
                flavour descriptions, and abstract concepts all work.
@@ -1268,6 +1297,26 @@ def ask(query: str) -> str:
 
         elif intent == "recommendation":
             parts.append(f"── VALUE FOR MONEY ANALYSIS ──\n{_analyze_best_value_coffees()}")
+
+        parts.append(
+            "── RESPONSE FORMAT (MANDATORY — follow exactly) ──\n"
+            "Write your answer in this structure and nothing else:\n\n"
+            "### [PhysicsModel name or root cause] — Why This Happens\n"
+            "One sentence: name the root cause with its exact scientific term "
+            "(e.g. 'intragranular diffusion coefficient', 'bimodal particle distribution') "
+            "plus its practical implication in the same breath.\n\n"
+            "### What To Do\n"
+            "- **[Key adjustment]**: one line of what to change and why\n"
+            "- **[Key adjustment]**: one line of what to change and why\n"
+            "- (optional third bullet)\n"
+            "Close with one italicised puck metaphor "
+            "(e.g. *Imagine water racing between grains, never slowing to pull from their cores.*).\n\n"
+            "### Source\n"
+            "Cite the expert or paper from the SOURCED_FROM edges above. "
+            "Omit this section entirely if none were retrieved — never fabricate a citation.\n\n"
+            "Hard rules: ≤150 words total. No filler openers ('it sounds like', "
+            "'great question', 'let me know'). No prose paragraphs. Markdown only."
+        )
 
         return "\n\n".join(p for p in parts if p.strip())
 
