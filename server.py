@@ -619,6 +619,15 @@ def _classify_intent(query: str) -> str:
     if (any(w in q for w in _DEFECT_WORD_MAP)
             or any(w in q for w in _NEGATIVE_SENSORY_WORDS)):
         return "diagnosis"
+    # Knowledge: explicit explanatory framing overrides brewing keyword matches.
+    # Checked before brewing so "what is extraction yield?" routes correctly
+    # instead of matching on the word "extract".
+    if any(w in q for w in [
+        "what is", "what are", "why is", "why does", "why do",
+        "explain", "how does", "what does", "tell me about",
+        "based on the research", "according to", "what model", "what theory",
+    ]):
+        return "knowledge"
     if any(w in q for w in [
         "how", "brew", "make", "grind", "temperature", "temp",
         "ratio", "dose", "pour", "steep", "extract", "pull", "shot",
