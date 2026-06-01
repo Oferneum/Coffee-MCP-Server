@@ -346,15 +346,14 @@ RELATIONSHIP_TYPES: dict[str, dict] = {
 
     "CAUSES": {
         "description": (
-            "A Defect, SensoryDescriptor at extreme concentration, or brewing "
-            "condition causes this Defect, negative FlavorNote, or PhysicsModel "
-            "phenomenon. Use for defect cascade chains (Channeling causes Astringency), "
-            "chemistry-to-defect links, and physical-force-to-outcome links "
-            "(e.g. high flow resistance causes channeling). "
-            "This is the primary edge type for the diagnosis engine."
+            "A Defect, SensoryDescriptor, BrewParameter out of range, BrewingRule "
+            "violation, or PhysicsModel phenomenon causes this Defect, FlavorNote, "
+            "BrewParameter deviation, or PhysicsModel outcome. Use for defect cascade "
+            "chains, chemistry-to-defect links, rule-violation-to-defect links, and "
+            "physical-force-to-outcome links. Primary edge type for the diagnosis engine."
         ),
-        "valid_sources": ["Defect", "SensoryDescriptor", "BrewParameter", "PhysicsModel"],
-        "valid_targets": ["Defect", "FlavorNote", "PhysicsModel"],
+        "valid_sources": ["Defect", "SensoryDescriptor", "BrewParameter", "PhysicsModel", "BrewingRule"],
+        "valid_targets": ["Defect", "FlavorNote", "PhysicsModel", "BrewParameter"],
         "example": "Defect:Channeling → CAUSES → Defect:Astringency",
     },
 
@@ -436,15 +435,16 @@ RELATIONSHIP_TYPES: dict[str, dict] = {
 
     "GOVERNED_BY": {
         "description": (
-            "A BrewMethod, BrewParameter, or GrindProfile obeys the constraints or "
-            "predictions of a PhysicsModel. Use when a scientific paper names a "
-            "specific mathematical model that describes the behaviour of an extraction "
-            "variable (e.g. flow rate follows Darcy's law, particle dissolution follows "
-            "the Double Porosity Model). Directed from the physical phenomenon to the "
-            "model that explains it."
+            "Links a physical phenomenon to the model that explains it, or a model "
+            "to the parameter it predicts. Two valid directions: "
+            "(1) BrewParameter/BrewMethod/GrindProfile → GOVERNED_BY → PhysicsModel "
+            "('flow rate obeys Darcy's law'); "
+            "(2) PhysicsModel → GOVERNED_BY → BrewParameter "
+            "('the Double Porosity Model governs extraction yield'). "
+            "Use whichever direction the source text implies."
         ),
-        "valid_sources": ["BrewMethod", "BrewParameter", "GrindProfile", "BrewingTechnique"],
-        "valid_targets": ["PhysicsModel"],
+        "valid_sources": ["BrewMethod", "BrewParameter", "GrindProfile", "BrewingTechnique", "PhysicsModel"],
+        "valid_targets": ["PhysicsModel", "BrewParameter"],
         "example": "BrewParameter:Flow Rate → GOVERNED_BY → PhysicsModel:Darcy Flow Model",
     },
 }
