@@ -1155,7 +1155,6 @@ def ask(query: str) -> str:
 
         # 2. Classify intent
         intent = _classify_intent(query)
-        print(f"DEBUG ask() | query={query!r} | intent={intent}")
 
         # 3. Unified retrieval (entity + vector + graph enrichment)
         retrieval = _unified_search(query)
@@ -1164,7 +1163,6 @@ def ask(query: str) -> str:
         # 4. Intent-specific enrichment
         if intent == "brewing":
             brew_methods = [n for n in _extract_mentioned_nodes(query) if n["node_type"] == "BrewMethod"]
-            print(f"DEBUG ask() | brewing | brew_methods={[m['name'] for m in brew_methods]}")
             if brew_methods:
                 # Named brew method: fetch its rules + diagnose the most recent
                 # shot made with that method.  This grounds the answer in the
@@ -1183,10 +1181,8 @@ def ask(query: str) -> str:
                     .execute()
                     .data
                 )
-                print(f"DEBUG ask() | brewing | recent_shots found={len(recent_shots)}")
                 if recent_shots:
                     diagnosis = _diagnose_shot(recent_shots[0])
-                    print(f"DEBUG ask() | brewing | diagnosis=\n{diagnosis}")
                     parts.append(
                         f"── YOUR MOST RECENT {brew_methods[0]['name'].upper()} SHOT ──\n{diagnosis}"
                     )
@@ -1204,7 +1200,6 @@ def ask(query: str) -> str:
                     .execute()
                     .data
                 )
-                print(f"DEBUG ask() | brewing fallback | shots found={len(fallback)}")
                 if fallback:
                     shot        = fallback[0]
                     method_name = shot.get("brew_method", "")
@@ -1214,7 +1209,6 @@ def ask(query: str) -> str:
                             f"── BREWING RULES (inferred from last shot: {method_name}) ──\n{rules_block}"
                         )
                     diagnosis = _diagnose_shot(shot)
-                    print(f"DEBUG ask() | brewing fallback | diagnosis=\n{diagnosis}")
                     label = method_name.upper() if method_name else "LAST"
                     parts.append(f"── YOUR MOST RECENT {label} SHOT ──\n{diagnosis}")
 
@@ -1239,7 +1233,6 @@ def ask(query: str) -> str:
                 n for n in _extract_mentioned_nodes(query)
                 if n["node_type"] == "BrewMethod"
             ]
-            print(f"DEBUG ask() | diagnosis | mentioned_methods={[m['name'] for m in mentioned_methods]}")
             if mentioned_methods:
                 recent_shots = (
                     supabase.table("shots")
@@ -1260,32 +1253,25 @@ def ask(query: str) -> str:
                     .data
                 )
 
-            print(f"DEBUG ask() | diagnosis | recent_shots found={len(recent_shots)}")
             if recent_shots:
                 shot        = recent_shots[0]
                 method_name = shot.get("brew_method", "?")
                 diagnosis   = _diagnose_shot(shot)
-                print(f"DEBUG ask() | diagnosis | method={method_name} | diagnosis=\n{diagnosis}")
                 parts.append(f"── SHOT DIAGNOSIS ({method_name.upper()}) ──\n{diagnosis}")
 
             # Defect graph traversal — this is what makes the answer
             # neuro-symbolic rather than purely retrieval-based.
             # The LLM should narrate these edges, not re-invent them.
             defect_ctx = _get_defect_graph_context(query)
-            print(f"DEBUG ask() | diagnosis | defect_ctx present={bool(defect_ctx)}")
             if defect_ctx:
                 parts.append(defect_ctx)
 
         elif intent == "recommendation":
             parts.append(f"── VALUE FOR MONEY ANALYSIS ──\n{_analyze_best_value_coffees()}")
 
-        result = "\n\n".join(p for p in parts if p.strip())
-        print(f"DEBUG ask() | final context sent to LLM: {len(result)} chars | parts={len(parts)}")
-        return result
+        return "\n\n".join(p for p in parts if p.strip())
 
     except Exception as e:
-        import traceback
-        print(f"DEBUG ask() | EXCEPTION: {e}\n{traceback.format_exc()}")
         return f"Error in ask: {str(e)}"
 
 
@@ -1412,6 +1398,112 @@ def get_recommendations() -> str:
 
     except Exception as e:
         return f"Error getting recommendations: {str(e)}"
+
+
+@mcp.tool()
+def introspect() -> str:
+    """
+    SCHEMA REGISTRY — Returns a live snapshot of the knowledge graph's ontology.
+
+    Combines static schema definitions from schema.py with live node and edge
+    counts from Supabase.  Call this when you need to:
+
+      • Understand what a node type means (e.g. what is a SensoryDescriptor?)
+      • Know how many nodes of each type currently exist in the graph
+      • Understand which relationship types connect which node types
+      • Orient yourself after new books have been ingested (new node types or
+        new instances of existing types may have been added)
+
+    This tool is the ontology layer of the semantic stack.  You do not need to
+    call it for every query — use it when ask() returns node types or
+    relationship types you want to reason about more precisely.
+    """
+    try:
+        from schema import NODE_TYPES, RELATIONSHIP_TYPES
+
+        # ── 1. Live node counts from Supabase ──────────────────────────────────
+        # Fetch only the node_type column — no properties, no embeddings.
+        # One Supabase call; Counter does the grouping in Python.
+        node_rows   = supabase.table("knowledge_nodes").select("node_type").execute().data
+        node_counts = Counter(row["node_type"] for row in node_rows)
+        total_nodes = sum(node_counts.values())
+
+        # ── 2. Live edge counts from Supabase ──────────────────────────────────
+        edge_rows   = supabase.table("knowledge_edges").select("relationship_type").execute().data
+        edge_counts = Counter(row["relationship_type"] for row in edge_rows)
+        total_edges = sum(edge_counts.values())
+
+        # How many schema-defined types currently have at least one node/edge
+        populated_node_types = sum(1 for t in NODE_TYPES if node_counts.get(t, 0) > 0)
+        used_rel_types       = sum(1 for r in RELATIONSHIP_TYPES if edge_counts.get(r, 0) > 0)
+
+        lines: list[str] = [
+            "── KNOWLEDGE GRAPH SCHEMA REGISTRY ──",
+            (
+                f"  {total_nodes} nodes  |  {total_edges} edges  "
+                f"|  {populated_node_types}/{len(NODE_TYPES)} node types populated  "
+                f"|  {used_rel_types}/{len(RELATIONSHIP_TYPES)} relationship types in use"
+            ),
+        ]
+
+        # ── 3. Node types ───────────────────────────────────────────────────────
+        # Sorted: populated types first (by count desc), then unpopulated (schema-
+        # defined but not yet ingested — important to surface after book ingestion).
+        lines.append("\nNODE TYPES:")
+        sorted_node_types = sorted(
+            NODE_TYPES.items(),
+            key=lambda kv: node_counts.get(kv[0], 0),
+            reverse=True,
+        )
+
+        for type_name, type_def in sorted_node_types:
+            count = node_counts.get(type_name, 0)
+
+            # Truncate the description to the first sentence — the full text is
+            # in schema.py for humans; Bean needs the one-liner to reason.
+            raw_desc    = type_def.get("description", "")
+            first_sent  = raw_desc.split(".")[0].strip() + "."
+
+            key_props   = type_def.get("key_properties", [])
+            examples    = type_def.get("example_names", [])[:4]
+
+            # Flag types with zero nodes — they're schema-defined but not yet
+            # populated.  This matters after book ingestion adds new types.
+            status = f"{count} nodes" if count > 0 else "0 nodes — schema defined, not yet ingested"
+
+            lines.append(f"\n  [{type_name}]  {status}")
+            lines.append(f"  {first_sent}")
+            if key_props:
+                lines.append(f"  Properties : {', '.join(key_props[:6])}")
+            if examples:
+                lines.append(f"  Examples   : {', '.join(examples)}")
+
+        # ── 4. Relationship types ───────────────────────────────────────────────
+        # Sorted: most-used relationships first, then unused ones.
+        lines.append("\nRELATIONSHIP TYPES:")
+        sorted_rels = sorted(
+            RELATIONSHIP_TYPES.items(),
+            key=lambda kv: edge_counts.get(kv[0], 0),
+            reverse=True,
+        )
+
+        for rel_name, rel_def in sorted_rels:
+            count   = edge_counts.get(rel_name, 0)
+            sources = ", ".join(rel_def.get("valid_sources", []))
+            targets = ", ".join(rel_def.get("valid_targets", []))
+            example = rel_def.get("example", "")
+            status  = f"{count} edges" if count > 0 else "0 edges — defined, not yet used"
+
+            lines.append(f"\n  {rel_name}  ({status})")
+            lines.append(f"  {rel_def['description']}")
+            lines.append(f"  {sources}  →  {targets}")
+            if example:
+                lines.append(f"  e.g. {example}")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"Error in introspect: {str(e)}"
 
 
 # =============================================================================
