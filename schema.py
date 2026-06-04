@@ -444,7 +444,7 @@ RELATIONSHIP_TYPES: dict[str, dict] = {
             "Use whichever direction the source text implies."
         ),
         "valid_sources": ["BrewMethod", "BrewParameter", "GrindProfile", "BrewingTechnique", "PhysicsModel"],
-        "valid_targets": ["PhysicsModel", "BrewParameter"],
+        "valid_targets": ["PhysicsModel", "BrewParameter", "BrewMethod"],
         "example": "BrewParameter:Flow Rate → GOVERNED_BY → PhysicsModel:Darcy Flow Model",
     },
 }
