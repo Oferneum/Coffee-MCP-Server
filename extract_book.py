@@ -56,25 +56,24 @@ def load_text(file_path: str) -> str:
             return f.read()
 
 
-def chunk_text(text: str, chunk_size: int = 1500, overlap: int = 300) -> list[str]:
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
     """
     Split text into overlapping word-boundary chunks.
 
-    chunk_size and overlap are in characters.  Overlap ensures that a claim
-    spanning a chunk boundary is seen in full by at least one LLM call.
+    chunk_size and overlap are in WORDS.  Default 500 words ≈ 3000 chars.
+    Use --chunk-size 1500 for denser scientific papers that need more context
+    per LLM call.  Overlap ensures claims spanning chunk boundaries are seen
+    in full by at least one extraction pass.
     """
     words = text.split()
-    # Rough conversion: average English word ≈ 5 chars + 1 space
-    word_chunk   = max(1, chunk_size  // 6)
-    word_overlap = max(1, overlap     // 6)
 
     chunks: list[str] = []
     i = 0
     while i < len(words):
-        chunk = " ".join(words[i : i + word_chunk])
+        chunk = " ".join(words[i : i + chunk_size])
         if len(chunk.strip()) > 80:   # skip near-empty tail chunks
             chunks.append(chunk)
-        i += word_chunk - word_overlap
+        i += chunk_size - overlap
     return chunks
 
 
@@ -523,7 +522,7 @@ def main() -> None:
     print("Coffee MCP — Book Ingestion")
     print(f"  File       : {args.file}")
     print(f"  Expert     : {args.expert}")
-    print(f"  Chunk size : {args.chunk_size} chars")
+    print(f"  Chunk size : {args.chunk_size} words")
     print(f"  Mode       : {'DRY RUN (no DB writes)' if args.dry_run else 'LIVE'}")
     print("=" * 60)
 
