@@ -395,14 +395,15 @@ RELATIONSHIP_TYPES: dict[str, dict] = {
 
     "CONFLICTS_WITH": {
         "description": (
-            "Two BrewingRules make contradictory claims about the same parameter. "
-            "Do NOT silently overwrite one rule with another when ingesting a new "
-            "book. Instead, keep both rules and add a CONFLICTS_WITH edge so the "
-            "system can surface the disagreement rather than hiding it. "
-            "The edge properties should explain the nature of the conflict."
+            "Two nodes make contradictory or notably contrasting claims. "
+            "Primary use: two BrewingRules that contradict each other on the same parameter — "
+            "do NOT silently overwrite, keep both and add this edge. "
+            "Secondary use: two Cultivars, Origins, or ProcessMethods with meaningfully "
+            "different flavour profiles or characteristics (e.g. SL28 vs SL34 acidity). "
+            "Edge properties should explain the nature of the contrast."
         ),
-        "valid_sources": ["BrewingRule"],
-        "valid_targets": ["BrewingRule"],
+        "valid_sources": ["BrewingRule", "Cultivar", "Origin", "ProcessMethod"],
+        "valid_targets": ["BrewingRule", "Cultivar", "Origin", "ProcessMethod"],
         "example": "BrewingRule:Bypass Dilution for Clarity → CONFLICTS_WITH → BrewingRule:Golden Ratio",
     },
 
