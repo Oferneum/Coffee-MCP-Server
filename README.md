@@ -113,7 +113,7 @@ Use `--dry-run` to validate extraction without writing to the DB.
 ```bash
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # add SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY
+cp .env.example .env   # SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY + admin gate vars
 uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 ```
 
@@ -122,3 +122,25 @@ Validate the graph schema at any time:
 ```bash
 python schema.py
 ```
+
+## Debugging the admin gate
+
+`research_and_ingest_topic` is admin-only: the server reads `x-user-email` +
+`x-research-secret` headers (forwarded by the frontend after Supabase auth) and
+compares them against the `ADMIN_EMAIL` / `RESEARCH_INGEST_SECRET` env vars,
+failing closed on any mismatch. `scripts/gate_test.sh` verifies this end-to-end
+over the live SSE transport **without scraping or writing anything** (it calls the
+tool with empty arguments, so a passed gate returns a harmless "provide a query"
+error):
+
+```bash
+BASE=https://YOUR-APP.up.railway.app
+
+./scripts/gate_test.sh $BASE                                          # no headers  → DENY
+./scripts/gate_test.sh $BASE attacker@evil.com wrong-secret          # bad creds   → DENY
+./scripts/gate_test.sh $BASE ofer.neumann123@gmail.com "$SECRET"     # admin creds → ALLOW
+```
+
+Expected: the first two print `restricted to system administrators`; the third
+prints `provide either a query...` (gate passed). If all three deny, the Railway
+env vars are likely unset.
