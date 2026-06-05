@@ -25,6 +25,9 @@ argument. The tool reads `x-user-email` + `x-research-secret` from the request c
 compares them (constant-time) against the `ADMIN_EMAIL` and `RESEARCH_INGEST_SECRET`
 env vars, and **fails closed** (returns the restricted-access string) on any mismatch or
 missing config. It reuses the schema-aware extraction/injection pipeline from `extract_book.py`.
+It is **fire-and-forget**: scraping/embedding/upsert (30–90s) run in a background thread
+(`_research_ingest_worker`) and the tool returns a one-line acknowledgement in milliseconds so
+the chat route never blocks. The outcome is logged server-side, not returned to the chat turn.
 
 The LLM never calls graph or vector functions directly. `ask()` internally runs three pipelines:
 1. **User Context** — fetches shot history and active bean from `shots` / `beans` tables

@@ -1,6 +1,7 @@
 import os
 import re
 import hmac
+import threading
 from urllib.parse import urlparse
 from collections import Counter
 from dotenv import load_dotenv
@@ -1685,57 +1686,39 @@ def _scrape_article(url: str) -> str | None:
         return None
 
 
-@mcp.tool()
-def research_and_ingest_topic(query: str = "", url: str = "", source_name: str = "") -> str:
+def _run_research_ingest(query: str, url: str, source_name: str) -> str:
     """
-    ADMIN-ONLY. Research a coffee-science topic on the web and permanently add
-    what it learns to the knowledge graph.
+    The heavy pipeline: search → scrape → LLM extraction → graph injection.
 
-    Given a search `query` (e.g. "coffee bed channeling causes") or a direct
-    article `url`, this finds and scrapes the article, extracts schema-conformant
-    nodes (BrewParameter, PhysicsModel, Defect, BrewingRule, …) and edges, and
-    upserts them into Supabase with embeddings. Provenance is recorded via a
-    SOURCED_FROM edge to an Expert node named after the source domain (override
-    with `source_name`). Upserts are idempotent, so re-running is safe.
-
-    This is a privileged, expensive, web-scraping + database-write operation. It
-    is restricted to the system administrator; ordinary users cannot run it. Only
-    call this when the operator explicitly asks to research and ingest knowledge.
+    Runs in a background thread (see research_and_ingest_topic) so the MCP tool
+    call returns immediately and the chat route never blocks. Returns/​logs a
+    human-readable summary; the result is not delivered back to the chat turn
+    that started it — progress is observable in the server logs.
     """
-    # ── Admin gate — abort BEFORE any web or DB activity ──────────────────────
-    denied = _authorize_admin()
-    if denied:
-        return denied
-
-    query = (query or "").strip()
-    url   = (url or "").strip()
-    if not query and not url:
-        return "Error: provide either a `query` to search or a direct `url` to ingest."
-
     # 1. Resolve candidate URLs (direct url wins; otherwise search the web)
     if url:
         candidates = [url]
     else:
         candidates = _search_candidate_urls(query)
         if not candidates:
-            return f"No web results found for '{query}'. Try a more specific query or pass a direct url."
+            return f"No web results found for '{query}'."
 
     # 2. Scrape the first candidate that yields enough readable prose
     MIN_WORDS = 150
-    text, url, tried = None, None, []
+    text, chosen, tried = None, None, []
     for candidate in candidates:
         scraped = _scrape_article(candidate)
         words = len((scraped or "").split())
         tried.append(f"{candidate} ({words}w)")
         if scraped and words >= MIN_WORDS:
-            text, url = scraped, candidate
+            text, chosen = scraped, candidate
             break
     if not text:
         return ("Could not extract enough readable text from any candidate "
-                f"(paywalled/JS-rendered/blocked). Tried:\n  - " + "\n  - ".join(tried))
+                "(paywalled/JS-rendered/blocked). Tried:\n  - " + "\n  - ".join(tried))
 
     # 3. Provenance / Expert node name
-    domain = urlparse(url).netloc.replace("www.", "")
+    domain = urlparse(chosen).netloc.replace("www.", "")
     expert = (source_name or "").strip() or domain or "Web Research"
 
     # 4. Schema-aware LLM extraction (reuses the book-ingestion pipeline)
@@ -1744,7 +1727,7 @@ def research_and_ingest_topic(query: str = "", url: str = "", source_name: str =
     expert_stub = {
         "node_type":  "Expert",
         "name":       expert,
-        "properties": {"full_name": expert, "organisation": "Web source", "source_url": url},
+        "properties": {"full_name": expert, "organisation": "Web source", "source_url": chosen},
     }
     all_nodes: list[dict] = [expert_stub]
     all_edges: list[dict] = []
@@ -1761,7 +1744,7 @@ def research_and_ingest_topic(query: str = "", url: str = "", source_name: str =
     if errors:
         return "Extraction produced schema errors; nothing was written:\n  - " + "\n  - ".join(errors)
     if len(valid_nodes) <= 1:   # only the Expert stub survived
-        return f"No schema-conformant knowledge could be extracted from {url}."
+        return f"No schema-conformant knowledge could be extracted from {chosen}."
 
     # 6. Inject — duplicate-safe upserts
     ensure_expert_node(supabase, openai_client, expert)
@@ -1770,15 +1753,70 @@ def research_and_ingest_topic(query: str = "", url: str = "", source_name: str =
 
     breakdown = Counter(n["node_type"] for n in valid_nodes)
     lines = [
-        f"✓ Ingested research from: {url}",
+        f"✓ Ingested research from: {chosen}",
         f"  Provenance (Expert): {expert}",
         f"  Nodes upserted: {len(id_map)}  |  Edges written: {edge_ok} (skipped {edge_skip})",
-        "  Node breakdown:",
+        "  Node breakdown: " + ", ".join(f"{t}:{c}" for t, c in sorted(breakdown.items(), key=lambda x: -x[1])),
     ]
-    for t, c in sorted(breakdown.items(), key=lambda x: -x[1]):
-        lines.append(f"    {t}: {c}")
-    lines.append("  These are now permanent in the knowledge graph and searchable via ask().")
     return "\n".join(lines)
+
+
+def _research_ingest_worker(query: str, url: str, source_name: str) -> None:
+    """Thread entry point: run the pipeline and log the outcome (never raises)."""
+    label = url or query
+    print(f"[research] ▶ background ingest started for: {label}")
+    try:
+        summary = _run_research_ingest(query, url, source_name)
+        print(f"[research] ✓ background ingest finished for {label}:\n{summary}")
+    except Exception as e:
+        print(f"[research] ✗ background ingest FAILED for {label}: {e!r}")
+
+
+@mcp.tool()
+def research_and_ingest_topic(query: str = "", url: str = "", source_name: str = "") -> str:
+    """
+    ADMIN-ONLY. Kick off web research on a coffee-science topic and add what it
+    learns to the knowledge graph. **Returns immediately** — do NOT wait for a
+    completion message.
+
+    Given a search `query` (e.g. "coffee bed channeling causes") or a direct
+    article `url`, this finds and scrapes the article, extracts schema-conformant
+    nodes (BrewParameter, PhysicsModel, Defect, BrewingRule, …) + edges, and
+    upserts them into Supabase with embeddings, with SOURCED_FROM provenance to
+    an Expert node named after the source domain (override with `source_name`).
+    Upserts are idempotent, so re-running is safe.
+
+    Because scraping + embedding + DB writes take 30–90s, the actual work runs in
+    a background thread on the server and this tool returns a one-line
+    acknowledgement in milliseconds. As soon as you receive that acknowledgement,
+    tell the user the ingestion has started in the background and continue the
+    conversation — there is no second result to wait for (outcome is logged
+    server-side). This is privileged and restricted to the system administrator.
+    """
+    # ── Admin gate — abort BEFORE doing anything else ─────────────────────────
+    denied = _authorize_admin()
+    if denied:
+        return denied
+
+    query = (query or "").strip()
+    url   = (url or "").strip()
+    if not query and not url:
+        return "Error: provide either a `query` to search or a direct `url` to ingest."
+
+    # Hand the heavy pipeline to a background thread and return at once. The
+    # daemon thread keeps running on the (always-on) Railway container; the chat
+    # route never blocks on scraping/embedding/DB writes.
+    threading.Thread(
+        target=_research_ingest_worker,
+        args=(query, url, source_name),
+        daemon=True,
+    ).start()
+
+    topic = url or query
+    return (f"✓ Started research & ingestion for: {topic}\n"
+            "Scraping, extraction and graph upserts are now running in the background "
+            "(~30–90s). No need to wait — let the user know the knowledge graph is "
+            "updating and carry on; the outcome is logged server-side.")
 
 
 # =============================================================================
