@@ -271,6 +271,47 @@ def deduplicate_nodes(nodes: list[dict]) -> list[dict]:
     return list(seen.values())
 
 
+def normalize_edges(edges: list[dict]) -> list[dict]:
+    """
+    Correct reversed-direction edges emitted by the LLM.
+
+    The extractor occasionally swaps source and target — e.g.
+    GrindProfile -PAIRS_WITH-> BrewMethod, when schema.py defines the edge as
+    BrewMethod -PAIRS_WITH-> GrindProfile. When the stated direction is invalid
+    per the relationship's valid_sources/valid_targets but the flipped direction
+    is valid, we flip it in place. Edges that are already valid — or invalid in
+    both directions — are left untouched for validate_extracted() to report.
+    """
+    from schema import RELATIONSHIP_TYPES
+
+    fixed = 0
+    for edge in edges:
+        rel     = edge.get("relationship")
+        src     = edge.get("source")
+        tgt     = edge.get("target")
+        rel_def = RELATIONSHIP_TYPES.get(rel)
+        if not rel_def or not isinstance(src, list) or not isinstance(tgt, list):
+            continue
+
+        valid_sources = rel_def.get("valid_sources", [])
+        valid_targets = rel_def.get("valid_targets", [])
+        if not valid_sources or not valid_targets:
+            continue
+
+        src_type, tgt_type = src[0], tgt[0]
+        forward_ok = src_type in valid_sources and tgt_type in valid_targets
+        flipped_ok = tgt_type in valid_sources and src_type in valid_targets
+
+        if not forward_ok and flipped_ok:
+            edge["source"], edge["target"] = tgt, src
+            print(f"  ↺ flipped {rel}: {src_type}→{tgt_type}  ⇒  {tgt_type}→{src_type}")
+            fixed += 1
+
+    if fixed:
+        print(f"  Normalized {fixed} reversed edge(s)")
+    return edges
+
+
 def deduplicate_edges(edges: list[dict]) -> list[dict]:
     """Remove duplicate (source, target, relationship) triples."""
     seen: set[tuple] = set()
@@ -562,6 +603,9 @@ def main() -> None:
 
     raw_node_count = len(all_nodes)
     raw_edge_count = len(all_edges)
+
+    # ── Normalize edge direction (flip reversed source/target) ─────────────────
+    all_edges = normalize_edges(all_edges)
 
     # ── Deduplicate ────────────────────────────────────────────────────────────
     all_nodes = deduplicate_nodes(all_nodes)

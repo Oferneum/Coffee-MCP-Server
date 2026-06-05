@@ -6,7 +6,7 @@
 
 ## Architecture: Semantic Layer
 
-The server exposes exactly **5 public MCP tools** to the LLM. All internal graph/vector routing is handled server-side.
+The server exposes **6 public MCP tools** to the LLM (5 general + 1 admin-only). All internal graph/vector routing is handled server-side.
 
 ```
 LLM (Bean)
@@ -14,8 +14,17 @@ LLM (Bean)
   ├── log_shot(...)           ← record a brew; returns graph-grounded diagnosis
   ├── get_recommendations()   ← VFM analysis + graph-paired origin suggestions
   ├── introspect()            ← live schema registry: node types, counts, relationships
-  └── seed_knowledge_graph()  ← admin: upsert NODES + EDGE_DEFINITIONS to Supabase
+  ├── seed_knowledge_graph()  ← admin: upsert NODES + EDGE_DEFINITIONS to Supabase
+  └── research_and_ingest_topic(query|url)  ← ADMIN-ONLY: web search → scrape → LLM extract → graph inject
 ```
+
+`research_and_ingest_topic` is gated to the system administrator. The MCP server is
+identity-blind, so authorization rides on headers the **frontend** attaches to its MCP
+transport requests *after* it authenticates the user with Supabase — never on an LLM
+argument. The tool reads `x-user-email` + `x-research-secret` from the request context,
+compares them (constant-time) against the `ADMIN_EMAIL` and `RESEARCH_INGEST_SECRET`
+env vars, and **fails closed** (returns the restricted-access string) on any mismatch or
+missing config. It reuses the schema-aware extraction/injection pipeline from `extract_book.py`.
 
 The LLM never calls graph or vector functions directly. `ask()` internally runs three pipelines:
 1. **User Context** — fetches shot history and active bean from `shots` / `beans` tables

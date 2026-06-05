@@ -1,5 +1,7 @@
 import os
 import re
+import hmac
+from urllib.parse import urlparse
 from collections import Counter
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -16,6 +18,16 @@ supabase: Client = create_client(supabase_url, supabase_key)
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 mcp = FastMCP("Coffee Barista MCP", host="0.0.0.0")
+
+# Admin gate for research_and_ingest_topic. The MCP server is otherwise
+# identity-blind, so authorization rides on headers the *frontend* attaches to
+# its MCP transport requests AFTER it authenticates the user with Supabase —
+# never on an LLM-supplied argument (which a user or a prompt-injected scraped
+# page could forge). Both must be set in the server environment for the tool to
+# ever run; if either is unset the tool fails closed.
+ADMIN_EMAIL: str = (os.environ.get("ADMIN_EMAIL") or "").strip().lower()
+RESEARCH_INGEST_SECRET: str = os.environ.get("RESEARCH_INGEST_SECRET") or ""
+_ADMIN_DENIED = "Error: This operation is restricted to system administrators."
 
 
 # =============================================================================
@@ -1558,6 +1570,215 @@ def introspect() -> str:
 
     except Exception as e:
         return f"Error in introspect: {str(e)}"
+
+
+# =============================================================================
+# RESEARCH AGENT — web search → scrape → LLM extraction → graph injection
+# Admin-only. Reuses the schema-aware extraction pipeline from extract_book.py
+# so every node/edge conforms to schema.py and all writes are duplicate-safe
+# upserts (on_conflict node_type,name and source_id,target_id,relationship_type).
+# =============================================================================
+
+from extract_book import (
+    build_schema_guide,
+    chunk_text,
+    extract_from_chunk,
+    normalize_edges,
+    deduplicate_nodes,
+    deduplicate_edges,
+    validate_extracted,
+    ensure_expert_node,
+    upsert_nodes_with_embeddings,
+    upsert_edges,
+)
+
+
+def _request_headers() -> dict:
+    """
+    Return the HTTP headers attached to the current MCP tool-call request.
+
+    Under the SSE transport the POST that carries a tool invocation propagates
+    its Starlette Request into the MCP request context (mcp/server/sse.py →
+    lowlevel server), so the frontend's per-session auth headers are readable
+    here. Returns {} when no request context is available — callers MUST treat
+    an empty result as unauthorized (fail closed).
+    """
+    try:
+        req = mcp.get_context().request_context.request
+        if req is None:
+            return {}
+        # Starlette Headers are case-insensitive; flatten to a lowercase dict.
+        return {k.lower(): v for k, v in req.headers.items()}
+    except Exception:
+        return {}
+
+
+def _authorize_admin() -> str | None:
+    """
+    Authorize the caller as the system administrator.
+
+    Trust comes from headers the frontend attaches to its MCP transport request
+    AFTER authenticating the user with Supabase — never from an LLM argument.
+    Returns None when authorized, or the safe denial string otherwise. Fails
+    closed on any missing server config, missing header, secret mismatch, or
+    email mismatch. Constant-time comparisons avoid leaking the secret/email.
+    """
+    if not ADMIN_EMAIL or not RESEARCH_INGEST_SECRET:
+        return _ADMIN_DENIED  # server not provisioned for admin ops → deny all
+
+    headers          = _request_headers()
+    presented_secret = headers.get("x-research-secret", "")
+    presented_email  = headers.get("x-user-email", "").strip().lower()
+
+    secret_ok = hmac.compare_digest(presented_secret, RESEARCH_INGEST_SECRET)
+    email_ok  = bool(presented_email) and hmac.compare_digest(presented_email, ADMIN_EMAIL)
+
+    return None if (secret_ok and email_ok) else _ADMIN_DENIED
+
+
+# Hosts that never yield scrapeable article prose — skip them as candidates.
+_NON_ARTICLE_HOSTS = (
+    "youtube.com", "youtu.be", "twitter.com", "x.com", "instagram.com",
+    "tiktok.com", "facebook.com", "pinterest.com", "reddit.com",
+)
+
+
+def _search_candidate_urls(query: str, max_results: int = 8) -> list[str]:
+    """Return candidate article URLs for `query`, best first, sans non-article hosts."""
+    try:
+        try:
+            from ddgs import DDGS                  # maintained successor package
+        except ImportError:                        # older deprecated name
+            from duckduckgo_search import DDGS
+        urls: list[str] = []
+        with DDGS() as ddgs:
+            for result in ddgs.text(query, max_results=max_results):
+                href = result.get("href") or result.get("url")
+                if not href:
+                    continue
+                host = urlparse(href).netloc.replace("www.", "").lower()
+                if any(host == h or host.endswith("." + h) for h in _NON_ARTICLE_HOSTS):
+                    continue
+                if href not in urls:
+                    urls.append(href)
+        return urls
+    except Exception as e:
+        print(f"  [research] search error: {e}")
+        return []
+
+
+def _scrape_article(url: str) -> str | None:
+    """Download `url` and extract clean main-body text via trafilatura."""
+    try:
+        import trafilatura
+        downloaded = trafilatura.fetch_url(url)
+        if not downloaded:
+            return None
+        return trafilatura.extract(
+            downloaded,
+            include_comments=False,
+            include_tables=True,
+            favor_recall=True,
+        )
+    except Exception as e:
+        print(f"  [research] scrape error: {e}")
+        return None
+
+
+@mcp.tool()
+def research_and_ingest_topic(query: str = "", url: str = "", source_name: str = "") -> str:
+    """
+    ADMIN-ONLY. Research a coffee-science topic on the web and permanently add
+    what it learns to the knowledge graph.
+
+    Given a search `query` (e.g. "coffee bed channeling causes") or a direct
+    article `url`, this finds and scrapes the article, extracts schema-conformant
+    nodes (BrewParameter, PhysicsModel, Defect, BrewingRule, …) and edges, and
+    upserts them into Supabase with embeddings. Provenance is recorded via a
+    SOURCED_FROM edge to an Expert node named after the source domain (override
+    with `source_name`). Upserts are idempotent, so re-running is safe.
+
+    This is a privileged, expensive, web-scraping + database-write operation. It
+    is restricted to the system administrator; ordinary users cannot run it. Only
+    call this when the operator explicitly asks to research and ingest knowledge.
+    """
+    # ── Admin gate — abort BEFORE any web or DB activity ──────────────────────
+    denied = _authorize_admin()
+    if denied:
+        return denied
+
+    query = (query or "").strip()
+    url   = (url or "").strip()
+    if not query and not url:
+        return "Error: provide either a `query` to search or a direct `url` to ingest."
+
+    # 1. Resolve candidate URLs (direct url wins; otherwise search the web)
+    if url:
+        candidates = [url]
+    else:
+        candidates = _search_candidate_urls(query)
+        if not candidates:
+            return f"No web results found for '{query}'. Try a more specific query or pass a direct url."
+
+    # 2. Scrape the first candidate that yields enough readable prose
+    MIN_WORDS = 150
+    text, url, tried = None, None, []
+    for candidate in candidates:
+        scraped = _scrape_article(candidate)
+        words = len((scraped or "").split())
+        tried.append(f"{candidate} ({words}w)")
+        if scraped and words >= MIN_WORDS:
+            text, url = scraped, candidate
+            break
+    if not text:
+        return ("Could not extract enough readable text from any candidate "
+                f"(paywalled/JS-rendered/blocked). Tried:\n  - " + "\n  - ".join(tried))
+
+    # 3. Provenance / Expert node name
+    domain = urlparse(url).netloc.replace("www.", "")
+    expert = (source_name or "").strip() or domain or "Web Research"
+
+    # 4. Schema-aware LLM extraction (reuses the book-ingestion pipeline)
+    schema_guide = build_schema_guide()
+    chunks = chunk_text(text, chunk_size=1200)[:8]   # bound LLM cost per call
+    expert_stub = {
+        "node_type":  "Expert",
+        "name":       expert,
+        "properties": {"full_name": expert, "organisation": "Web source", "source_url": url},
+    }
+    all_nodes: list[dict] = [expert_stub]
+    all_edges: list[dict] = []
+    for i, chunk in enumerate(chunks, 1):
+        result = extract_from_chunk(openai_client, chunk, expert, schema_guide, i, len(chunks))
+        all_nodes.extend(result.get("nodes", []))
+        all_edges.extend(result.get("edges", []))
+
+    # 5. Normalize edge direction → dedup → validate against schema.py
+    all_edges = normalize_edges(all_edges)
+    all_nodes = deduplicate_nodes(all_nodes)
+    all_edges = deduplicate_edges(all_edges)
+    valid_nodes, valid_edges, errors = validate_extracted(all_nodes, all_edges)
+    if errors:
+        return "Extraction produced schema errors; nothing was written:\n  - " + "\n  - ".join(errors)
+    if len(valid_nodes) <= 1:   # only the Expert stub survived
+        return f"No schema-conformant knowledge could be extracted from {url}."
+
+    # 6. Inject — duplicate-safe upserts
+    ensure_expert_node(supabase, openai_client, expert)
+    id_map = upsert_nodes_with_embeddings(supabase, openai_client, valid_nodes)
+    edge_ok, edge_skip = upsert_edges(supabase, valid_edges, id_map)
+
+    breakdown = Counter(n["node_type"] for n in valid_nodes)
+    lines = [
+        f"✓ Ingested research from: {url}",
+        f"  Provenance (Expert): {expert}",
+        f"  Nodes upserted: {len(id_map)}  |  Edges written: {edge_ok} (skipped {edge_skip})",
+        "  Node breakdown:",
+    ]
+    for t, c in sorted(breakdown.items(), key=lambda x: -x[1]):
+        lines.append(f"    {t}: {c}")
+    lines.append("  These are now permanent in the knowledge graph and searchable via ask().")
+    return "\n".join(lines)
 
 
 # =============================================================================
