@@ -611,14 +611,104 @@ _NEGATIVE_SENSORY_WORDS: frozenset[str] = frozenset({
 })
 
 
+_VALID_INTENTS: frozenset[str] = frozenset(
+    {"recommendation", "diagnosis", "brewing", "knowledge"}
+)
+
+_INTENT_ROUTER_SYSTEM_PROMPT = """\
+You are an intent router for a coffee assistant. Read the user's message and
+classify it into EXACTLY ONE of these four intents. Respond with ONLY the
+single lowercase category word — one of:
+recommendation | diagnosis | brewing | knowledge
+No quotes, no punctuation, no JSON, no explanation. Just the one word.
+
+CATEGORIES
+
+recommendation — The user wants a suggestion about WHICH coffee/bean to buy,
+  try, or whether something is worth the money. Value-for-money, "what should I
+  try next", "which bean is best", purchasing decisions.
+  e.g. "what bean should I buy next?", "is this roaster worth it?",
+       "recommend something fruity"
+
+diagnosis — The user is describing a PROBLEM with a coffee they made and wants
+  to know what went wrong or how to fix it. Negative taste/quality signals:
+  sour, bitter, harsh, astringent, channeling, "my shot was bad",
+  "why did it taste off". These need shot history + defect cause/prevention.
+  e.g. "why was my espresso so sour?", "my coffee tastes bitter and thin",
+       "I keep getting channeling"
+
+brewing — The user wants ACTIONABLE how-to guidance to prepare or improve a brew
+  THEY are making: recipes, parameters, dialing in, grind/temp/ratio/dose
+  adjustments, techniques to apply. This is "how do I make/brew/adjust X".
+  e.g. "how do I brew a V60?", "what grind for espresso?",
+       "how should I dial in this bean?", "how to do WDT"
+
+knowledge — The user wants to UNDERSTAND a concept, mechanism, or fact about
+  coffee science, origins, processing, or chemistry. Explanatory/educational,
+  NOT tied to fixing or making their own cup.
+  e.g. "what is extraction yield?", "how is decaf made?",
+       "why does light roast taste more acidic?", "what is the Maillard reaction?"
+
+CRITICAL EDGE CASE — "how" questions:
+  - "how do I brew / make / adjust <my drink>"     → brewing (actionable, theirs)
+  - "how does <X> work" / "how is <X> made"        → knowledge (conceptual)
+  "how is decaf made" is knowledge, NOT brewing.
+  "how do I make a good espresso" is brewing.
+
+If genuinely ambiguous, prefer the more specific intent in this priority order:
+diagnosis > recommendation > brewing > knowledge.
+Respond with ONLY the single category word, nothing else."""
+
+
 def _classify_intent(query: str) -> str:
     """
-    Keyword-based intent classification.
+    Semantic LLM intent router.
     Returns one of: 'recommendation' | 'diagnosis' | 'brewing' | 'knowledge'
 
-    Order matters: diagnosis is checked before brewing because many defect
-    queries contain brewing words ("shot", "extract") and would otherwise
-    be misrouted, causing the diagnosis pipeline to be skipped entirely.
+    Uses a fast model (gpt-4o-mini) with a strong category-defining system
+    prompt to classify the query. This handles paraphrase, typos, and the
+    "how to brew" vs "how does X work" distinction that the old substring
+    heuristic missed (e.g. "how is decaf made" → knowledge, not brewing).
+
+    For latency the model returns a single bare word (no JSON wrapper), capped
+    at a few tokens. Reliability contract: this function ALWAYS returns a valid
+    intent. If the API call fails, times out, or returns an unrecognised label,
+    it falls back to the deterministic keyword classifier
+    (`_classify_intent_keyword`) so `ask()` never receives an invalid value.
+    """
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0,
+            max_tokens=8,
+            messages=[
+                {"role": "system", "content": _INTENT_ROUTER_SYSTEM_PROMPT},
+                {"role": "user", "content": query},
+            ],
+        )
+        raw = response.choices[0].message.content or ""
+        # Normalise: drop stray quotes/punctuation/casing, take the first word.
+        tokens = raw.strip().strip('"\'.`').lower().split()
+        intent = tokens[0] if tokens else ""
+        if intent in _VALID_INTENTS:
+            return intent
+        # Unrecognised label → deterministic fallback rather than guessing.
+        return _classify_intent_keyword(query)
+    except Exception:
+        # Any API/parse failure must not break routing — degrade gracefully.
+        return _classify_intent_keyword(query)
+
+
+def _classify_intent_keyword(query: str) -> str:
+    """
+    Deterministic keyword fallback for `_classify_intent`.
+    Returns one of: 'recommendation' | 'diagnosis' | 'brewing' | 'knowledge'
+
+    Used only when the LLM router is unavailable. Order matters: diagnosis is
+    checked before brewing because many defect queries contain brewing words
+    ("shot", "extract") and would otherwise be misrouted; knowledge framing is
+    checked before brewing so "what is extraction yield?" doesn't match on the
+    word "extract".
     """
     q = query.lower()
     if any(w in q for w in [
@@ -626,15 +716,9 @@ def _classify_intent(query: str) -> str:
         "worth", "value", "vfm", "try next", "should i buy", "what should i try",
     ]):
         return "recommendation"
-    # Diagnosis: any defect node word OR negative-sensory signal.
-    # These queries need shot data + CAUSES/PREVENTS graph traversal, not
-    # just brewing rules — so they get their own routing branch.
     if (any(w in q for w in _DEFECT_WORD_MAP)
             or any(w in q for w in _NEGATIVE_SENSORY_WORDS)):
         return "diagnosis"
-    # Knowledge: explicit explanatory framing overrides brewing keyword matches.
-    # Checked before brewing so "what is extraction yield?" routes correctly
-    # instead of matching on the word "extract".
     if any(w in q for w in [
         "what is", "what are", "why is", "why does", "why do",
         "explain", "how does", "what does", "tell me about",
