@@ -1249,6 +1249,17 @@ def ask(query: str) -> str:
     - Getting personalised picks   → get_recommendations() (more detailed than ask)
     - Re-seeding the graph         → seed_knowledge_graph() (admin only)
 
+    CRITICAL — DO NOT call ask() (or any tool) in these situations:
+    • The user asks a simple conversational or factual question you can answer
+      from internal knowledge without DB data ("what is a flat white?",
+      "who is James Hoffmann?", "what does bloom mean?"). Calling a tool here
+      adds latency with no benefit — just answer directly.
+    • The user explicitly says "in general", "not from my history", or
+      "hypothetically". They are opting out of personalisation — answer from
+      your training knowledge without touching the DB.
+    • The question is about another person's equipment or workflow entirely
+      unrelated to the user's own shots or beans.
+
     RESPONSE FORMAT — Scientist-to-Barista framework (mandatory for all answers):
 
     Structure every response in three sections:
@@ -1447,6 +1458,17 @@ def log_shot(
     user's parameters against the knowledge graph's BrewingRules for their
     chosen method (e.g. whether extraction time is within the optimal window).
 
+    CRITICAL — DO NOT call this tool in the following situations:
+    • The user is asking a theoretical question about brewing parameters ("what
+      should my yield be for espresso?"). That is a knowledge question — call
+      ask() instead. Only call log_shot() when the user is recording a real
+      shot they actually just made.
+    • The user has not provided real numbers (dose, yield, time, score). Do not
+      guess or invent parameters — ask the user for the missing values first.
+    • The user is describing a hypothetical shot ("if I pulled at 1:2.5 ratio,
+      what would happen?"). Hypotheticals are not logged — answer from your
+      knowledge or call ask() for graph-grounded context.
+
     Args:
         brew_method:      Brew method used. Common values: "Espresso", "V60",
                           "French Press", "Chemex", "AeroPress", "Cold Brew".
@@ -1512,6 +1534,21 @@ def get_recommendations() -> str:
     3. GRAPH PAIRINGS — Origins that the knowledge graph recommends for the
        user's most-used brew method (via PAIRS_WITH edges), so suggestions
        are grounded in structured coffee science rather than generic advice.
+
+    CRITICAL — DO NOT call this tool in the following situations:
+    • The user is asking a general theory question ("what beans work well with
+      espresso in general?", "what origins are fruity?"). Use your internal
+      knowledge or call ask() instead — this tool only knows about beans the
+      user has personally logged shots against, not coffee in general.
+    • The user is asking about someone else's setup or equipment ("what would
+      you recommend for my friend?"). This tool reads the current user's DB
+      history only and will return irrelevant personal data.
+    • The user explicitly signals they want general advice ("not from my DB",
+      "in general", "hypothetically", "ignoring my history"). Respect that
+      signal — answer from your internal knowledge without calling any tool.
+    • The user has no shot history yet. VFM analysis requires logged shots;
+      calling this tool with an empty DB returns meaningless output. Prompt
+      the user to log a shot with log_shot() first.
     """
     try:
         parts: list[str] = []
@@ -1568,6 +1605,15 @@ def introspect() -> str:
     This tool is the ontology layer of the semantic stack.  You do not need to
     call it for every query — use it when ask() returns node types or
     relationship types you want to reason about more precisely.
+
+    CRITICAL — DO NOT call this tool in the following situations:
+    • The user asks a general coffee question. introspect() returns schema
+      metadata (node type counts, relationship definitions) — it contains no
+      brewing advice, flavor data, or user history. It will not help answer
+      "what is the best grind for V60?" — call ask() for that.
+    • Routine queries where you already understand the schema. Calling
+      introspect() on every turn is wasteful — only call it when you genuinely
+      need to reason about which node types or relationship types exist.
     """
     try:
         from schema import NODE_TYPES, RELATIONSHIP_TYPES
