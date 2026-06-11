@@ -18,6 +18,7 @@ from openai import OpenAI
 from supabase import create_client, Client
 
 from extract_book import (
+    load_text,
     build_schema_guide,
     chunk_text,
     extract_from_chunk,
@@ -31,6 +32,47 @@ from extract_book import (
 )
 
 load_dotenv()
+
+
+def purge_source(doc_id: str, supabase: Client) -> tuple[int, int]:
+    """
+    Delete all nodes (and their edges) previously ingested from `doc_id`.
+
+    `doc_id` is the document identifier — the filename or URL of the specific
+    paper, NOT the expert/author name (one author may have multiple papers).
+    Relies on the `_source` field stamped into every node's properties at
+    upsert time — NOT on SOURCED_FROM edges, which the LLM only creates for
+    some node types and could miss entirely.
+
+    Returns (nodes_deleted, edges_deleted).
+    """
+    # Find every node tagged with this document — covers all node types uniformly
+    resp = (
+        supabase.table("knowledge_nodes")
+        .select("id")
+        .eq("properties->>_source", doc_id)
+        .execute()
+    )
+    if not resp.data:
+        return 0, 0
+
+    all_ids = [row["id"] for row in resp.data]
+
+    # Delete all edges touching any of those nodes (both directions)
+    edges_deleted = 0
+    for node_id in all_ids:
+        r1 = supabase.table("knowledge_edges").delete().eq("source_id", node_id).execute()
+        r2 = supabase.table("knowledge_edges").delete().eq("target_id", node_id).execute()
+        edges_deleted += len(r1.data or []) + len(r2.data or [])
+
+    # Delete the nodes
+    nodes_deleted = 0
+    for node_id in all_ids:
+        r = supabase.table("knowledge_nodes").delete().eq("id", node_id).execute()
+        nodes_deleted += len(r.data or [])
+
+    return nodes_deleted, edges_deleted
+
 
 _NON_ARTICLE_HOSTS = (
     "youtube.com", "youtu.be", "twitter.com", "x.com", "instagram.com",
@@ -78,54 +120,75 @@ def scrape_article(url: str) -> str | None:
         return None
 
 
-def run(query: str, url: str, source_name: str, supabase: Client, openai_client: OpenAI) -> int:
+def run(query: str, url: str, file: str, source: str, expert_name: str, supabase: Client, openai_client: OpenAI) -> int:
     """Execute the full pipeline with live progress output. Returns exit code."""
 
-    # 1. Resolve candidate URLs
-    if url:
-        candidates = [url]
+    # 1 & 2. Resolve text — local file skips search and scraping entirely
+    if file:
+        print(f"\n[1/5] Reading local file: {file}")
+        text = load_text(file)
+        words = len(text.split())
+        print(f"  ✓ {words} words extracted.")
+        chosen = file
+        default_source = os.path.splitext(os.path.basename(file))[0]
+        default_expert = default_source
     else:
-        print(f"\n[1/5] Searching: {query!r} ...")
-        candidates = search_candidate_urls(query)
-        if not candidates:
-            print(f"  No web results found.", file=sys.stderr)
-            return 1
-        print(f"  Found {len(candidates)} candidate(s):")
-        for c in candidates:
-            print(f"    {c}")
-
-    # 2. Scrape the first candidate with enough prose
-    MIN_WORDS = 150
-    text, chosen, tried = None, None, []
-
-    print(f"\n[2/5] Scraping ...")
-    for candidate in candidates:
-        print(f"  Trying: {candidate}")
-        scraped = scrape_article(candidate)
-        words = len((scraped or "").split())
-        tried.append(f"{candidate} ({words}w)")
-        if scraped and words >= MIN_WORDS:
-            text, chosen = scraped, candidate
-            print(f"  ✓ {words} words extracted.")
-            break
+        if url:
+            candidates = [url]
         else:
-            print(f"  ✗ Only {words} words — skipping.")
+            print(f"\n[1/5] Searching: {query!r} ...")
+            candidates = search_candidate_urls(query)
+            if not candidates:
+                print(f"  No web results found.", file=sys.stderr)
+                return 1
+            print(f"  Found {len(candidates)} candidate(s):")
+            for c in candidates:
+                print(f"    {c}")
 
-    if not text:
-        print("\nCould not extract enough readable text. Tried:", file=sys.stderr)
-        for t in tried:
-            print(f"  - {t}", file=sys.stderr)
-        return 1
+        MIN_WORDS = 150
+        text, chosen, tried = None, None, []
 
-    # 3. Provenance
-    domain = urlparse(chosen).netloc.replace("www.", "")
-    expert = (source_name or "").strip() or domain or "Web Research"
-    print(f"\n[3/5] Provenance → Expert node: {expert!r}")
+        print(f"\n[2/5] Scraping ...")
+        for candidate in candidates:
+            print(f"  Trying: {candidate}")
+            scraped = scrape_article(candidate)
+            words = len((scraped or "").split())
+            tried.append(f"{candidate} ({words}w)")
+            if scraped and words >= MIN_WORDS:
+                text, chosen = scraped, candidate
+                print(f"  ✓ {words} words extracted.")
+                break
+            else:
+                print(f"  ✗ Only {words} words — skipping.")
+
+        if not text:
+            print("\nCould not extract enough readable text. Tried:", file=sys.stderr)
+            for t in tried:
+                print(f"  - {t}", file=sys.stderr)
+            return 1
+
+        default_source = chosen   # URL is the natural document identifier
+        default_expert = urlparse(chosen).netloc.replace("www.", "")
+
+    # 3. Provenance — two separate identifiers:
+    #   doc_id : the article title / filename — unique per document, used as _source stamp
+    #   expert : the author name — used for the Expert node and SOURCED_FROM edges
+    doc_id = (source or "").strip() or default_source or chosen
+    expert = (expert_name or "").strip() or default_expert or "Web Research"
+    print(f"\n[3/5] Provenance → document: {doc_id!r}  |  expert: {expert!r}")
+
+    # 3b. Purge by document id — never by expert, one author may have many papers.
+    print(f"  Purging previous ingestion for {doc_id!r} ...")
+    n_del, e_del = purge_source(doc_id, supabase)
+    if n_del or e_del:
+        print(f"  ✓ Removed {n_del} node(s) and {e_del} edge(s).")
+    else:
+        print(f"  (nothing to purge — first ingestion)")
 
     # 4. Schema-aware LLM extraction
     schema_guide = build_schema_guide()
-    chunks = chunk_text(text, chunk_size=1200)[:8]
-    print(f"\n[4/5] Extracting knowledge ({len(chunks)} chunk(s)) ...")
+    chunks = chunk_text(text, chunk_size=500)
+    print(f"\n[4/6] Extracting knowledge ({len(chunks)} chunk(s)) ...")
 
     expert_stub = {
         "node_type":  "Expert",
@@ -144,7 +207,7 @@ def run(query: str, url: str, source_name: str, supabase: Client, openai_client:
         all_edges.extend(result.get("edges", []))
 
     # 5. Normalize → dedup → validate
-    print(f"\n[5/5] Normalising, deduplicating, validating ...")
+    print(f"\n[5/6] Normalising, deduplicating, validating ...")
     all_edges = normalize_edges(all_edges)
     all_nodes = deduplicate_nodes(all_nodes)
     all_edges = deduplicate_edges(all_edges)
@@ -162,8 +225,15 @@ def run(query: str, url: str, source_name: str, supabase: Client, openai_client:
 
     print(f"  {len(valid_nodes)} valid nodes, {len(valid_edges)} valid edges.")
 
+    # Stamp every node with the document identifier (filename or URL) so
+    # purge_source can find them reliably on re-ingestion. Uses `chosen`, not
+    # `expert` — an author may publish multiple papers; purging by author would
+    # wipe all of them.
+    for node in valid_nodes:
+        node.setdefault("properties", {})["_source"] = doc_id
+
     # 6. Upsert to Supabase
-    print(f"\n  Writing to Supabase ...")
+    print(f"\n[6/6] Writing to Supabase ...")
     ensure_expert_node(supabase, openai_client, expert)
     id_map = upsert_nodes_with_embeddings(supabase, openai_client, valid_nodes)
     edge_ok, edge_skip = upsert_edges(supabase, valid_edges, id_map)
@@ -171,7 +241,7 @@ def run(query: str, url: str, source_name: str, supabase: Client, openai_client:
     breakdown = Counter(n["node_type"] for n in valid_nodes)
 
     print(f"\n✓ Done.")
-    print(f"  Source  : {chosen}")
+    print(f"  Source  : {os.path.abspath(chosen) if file else chosen}")
     print(f"  Expert  : {expert}")
     print(f"  Nodes   : {len(id_map)} upserted")
     print(f"  Edges   : {edge_ok} written, {edge_skip} skipped")
@@ -188,8 +258,11 @@ def main() -> None:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("query", nargs="?", help="Search query (DuckDuckGo)")
     group.add_argument("--url", help="Direct URL to scrape (skips search)")
-    parser.add_argument("--source", default="", metavar="NAME",
-                        help="Override Expert node name (default: article domain)")
+    group.add_argument("--file", metavar="PATH", help="Local PDF or .txt file (skips search and scraping)")
+    parser.add_argument("--source", default="", metavar="TITLE",
+                        help="Article title — used as the document identifier for purge/re-ingestion (default: filename or URL)")
+    parser.add_argument("--expert", default="", metavar="NAME",
+                        help="Expert node name — author attribution (default: filename or article domain)")
 
     args = parser.parse_args()
 
@@ -202,7 +275,9 @@ def main() -> None:
     sys.exit(run(
         query=args.query or "",
         url=args.url or "",
-        source_name=args.source,
+        file=args.file or "",
+        source=args.source,
+        expert_name=args.expert,
         supabase=supabase,
         openai_client=openai_client,
     ))
