@@ -450,7 +450,12 @@ def _enrich_node(node: dict, similarity: float | None = None) -> str:
     sim_tag = f"  (similarity: {similarity:.4f})" if similarity is not None else ""
     lines = [f"  [{node.get('node_type','?')}] {node.get('name','?')}{sim_tag}"]
     props = node.get("properties") or {}
+    # Surface _source explicitly so Bean can always cite the origin document.
+    if "_source" in props:
+        lines.append(f"    source: {props['_source']}")
     for k, v in list(props.items())[:4]:
+        if k == "_source":
+            continue
         val = ", ".join(str(x) for x in v) if isinstance(v, list) else str(v)
         lines.append(f"    {k}: {val}")
     node_id = node.get("id")
@@ -1311,7 +1316,7 @@ def ask(query: str) -> str:
             "Be concise (under 150 words). Write like a knowledgeable friend.\n"
             "Ground every claim in the retrieved data below — use the exact node names "
             "(PhysicsModel, BrewParameter, Defect, etc.) rather than paraphrasing them.\n"
-            "If SOURCED_FROM edges appear in the data, end with: Source: [expert or paper name]\n"
+            "If any retrieved node has a 'source:' property, end with: Source: [that value]\n"
             "Never fabricate a citation. If no source is in the data, omit the Source line."
         )
 
