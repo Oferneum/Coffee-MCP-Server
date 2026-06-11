@@ -440,9 +440,24 @@ def _vector_search_raw(embedding: list[float], threshold: float = 0.2, count: in
     return resp.data or []
 
 
+_ACRONYMS = {
+    "rdt":  "ross droplet technique",
+    "wdt":  "weiss distribution technique",
+    "tds":  "total dissolved solids",
+    "ey":   "extraction yield",
+    "pid":  "pid controller",
+    "sca":  "specialty coffee association",
+    "vst":  "vst basket",
+    "v60":  "v60",
+}
+
 def _extract_mentioned_nodes(query: str) -> list[dict]:
     all_nodes = supabase.table("knowledge_nodes").select("id, node_type, name, properties").execute().data
     q = query.lower()
+    # Expand known acronyms so substring matching finds the full node name.
+    for acronym, expansion in _ACRONYMS.items():
+        if re.search(r"\b" + acronym + r"\b", q):
+            q = q + " " + expansion
     return [n for n in all_nodes if n["name"].lower() in q]
 
 
@@ -1314,7 +1329,13 @@ def ask(query: str) -> str:
             "Plain text only — the app does not render markdown. "
             "Do not use #, ##, **, *, --, > or any other markdown syntax.\n"
             "Be concise (under 150 words). Write like a knowledgeable friend.\n"
-            "Ground every claim in the retrieved data below — use the exact node names "
+            "CRITICAL: Base your answer EXCLUSIVELY on the retrieved data sections below. "
+            "Your pre-trained knowledge is OVERRIDDEN by this data. If the retrieved data "
+            "says X causes Y, state that — even if your baseline weights suggest otherwise. "
+            "If the retrieved data does not contain enough information to answer, say exactly: "
+            "'I don't have specific data on that in my knowledge graph yet.' Do NOT invent, "
+            "infer, or fill gaps from pre-trained knowledge.\n"
+            "Ground every claim in the retrieved data — use the exact node names "
             "(PhysicsModel, BrewParameter, Defect, etc.) rather than paraphrasing them.\n"
             "If any retrieved node has a 'source:' property, end with: Source: [that value]\n"
             "Never fabricate a citation. If no source is in the data, omit the Source line."
