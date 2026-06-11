@@ -1,7 +1,7 @@
 import os
 import re
 import hmac
-import threading
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 from collections import Counter
 from dotenv import load_dotenv
@@ -17,6 +17,9 @@ supabase_key: str = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(supabase_url, supabase_key)
 
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+# Bounded pool for background ingestion jobs — caps concurrency, reuses threads.
+_ingest_executor = ThreadPoolExecutor(max_workers=4)
 
 mcp = FastMCP("Coffee Barista MCP", host="0.0.0.0")
 
@@ -1933,14 +1936,10 @@ def research_and_ingest_topic(query: str = "", url: str = "", source_name: str =
     if not query and not url:
         return "Error: provide either a `query` to search or a direct `url` to ingest."
 
-    # Hand the heavy pipeline to a background thread and return at once. The
-    # daemon thread keeps running on the (always-on) Railway container; the chat
-    # route never blocks on scraping/embedding/DB writes.
-    threading.Thread(
-        target=_research_ingest_worker,
-        args=(query, url, source_name),
-        daemon=True,
-    ).start()
+    # Hand the heavy pipeline to the executor and return at once. The pool
+    # keeps running on the (always-on) Railway container; the chat route never
+    # blocks on scraping/embedding/DB writes.
+    _ingest_executor.submit(_research_ingest_worker, query, url, source_name)
 
     topic = url or query
     return (f"✓ Started research & ingestion for: {topic}\n"
