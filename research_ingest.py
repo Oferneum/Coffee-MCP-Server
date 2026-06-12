@@ -120,7 +120,7 @@ def scrape_article(url: str) -> str | None:
         return None
 
 
-def run(query: str, url: str, file: str, source: str, expert_name: str, supabase: Client, openai_client: OpenAI) -> int:
+def run(query: str, url: str, file: str, source: str, expert_name: str, supabase: Client, openai_client: OpenAI, dry_run: bool = False) -> int:
     """Execute the full pipeline with live progress output. Returns exit code."""
 
     # 1 & 2. Resolve text — local file skips search and scraping entirely
@@ -177,13 +177,16 @@ def run(query: str, url: str, file: str, source: str, expert_name: str, supabase
     expert = (expert_name or "").strip() or default_expert or "Web Research"
     print(f"\n[3/5] Provenance → document: {doc_id!r}  |  expert: {expert!r}")
 
-    # 3b. Purge by document id — never by expert, one author may have many papers.
-    print(f"  Purging previous ingestion for {doc_id!r} ...")
-    n_del, e_del = purge_source(doc_id, supabase)
-    if n_del or e_del:
-        print(f"  ✓ Removed {n_del} node(s) and {e_del} edge(s).")
+    # 3b. Purge by document id — skipped in dry-run mode.
+    if dry_run:
+        print(f"  [dry-run] skipping purge.")
     else:
-        print(f"  (nothing to purge — first ingestion)")
+        print(f"  Purging previous ingestion for {doc_id!r} ...")
+        n_del, e_del = purge_source(doc_id, supabase)
+        if n_del or e_del:
+            print(f"  ✓ Removed {n_del} node(s) and {e_del} edge(s).")
+        else:
+            print(f"  (nothing to purge — first ingestion)")
 
     # 4. Schema-aware LLM extraction
     schema_guide = build_schema_guide()
@@ -223,7 +226,16 @@ def run(query: str, url: str, file: str, source: str, expert_name: str, supabase
         print(f"\nNo schema-conformant knowledge extracted from {chosen}.", file=sys.stderr)
         return 1
 
+    breakdown = Counter(n["node_type"] for n in valid_nodes)
     print(f"  {len(valid_nodes)} valid nodes, {len(valid_edges)} valid edges.")
+    print(f"  Breakdown: {', '.join(f'{t}:{c}' for t, c in sorted(breakdown.items(), key=lambda x: -x[1]))}")
+
+    if dry_run:
+        print(f"\n── DRY RUN complete — no DB writes. ──")
+        print(f"  Nodes that would be ingested:")
+        for n in valid_nodes:
+            print(f"    [{n['node_type']}] {n['name']}")
+        return 0
 
     # Stamp every node with the document identifier (filename or URL) so
     # purge_source can find them reliably on re-ingestion. Uses `chosen`, not
@@ -238,14 +250,11 @@ def run(query: str, url: str, file: str, source: str, expert_name: str, supabase
     id_map = upsert_nodes_with_embeddings(supabase, openai_client, valid_nodes)
     edge_ok, edge_skip = upsert_edges(supabase, valid_edges, id_map)
 
-    breakdown = Counter(n["node_type"] for n in valid_nodes)
-
     print(f"\n✓ Done.")
     print(f"  Source  : {os.path.abspath(chosen) if file else chosen}")
     print(f"  Expert  : {expert}")
     print(f"  Nodes   : {len(id_map)} upserted")
     print(f"  Edges   : {edge_ok} written, {edge_skip} skipped")
-    print(f"  Breakdown: {', '.join(f'{t}:{c}' for t, c in sorted(breakdown.items(), key=lambda x: -x[1]))}")
     return 0
 
 
@@ -263,6 +272,8 @@ def main() -> None:
                         help="Article title — used as the document identifier for purge/re-ingestion (default: filename or URL)")
     parser.add_argument("--expert", default="", metavar="NAME",
                         help="Expert node name — author attribution (default: filename or article domain)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Extract and print nodes without writing to the database")
 
     args = parser.parse_args()
 
@@ -278,6 +289,7 @@ def main() -> None:
         file=args.file or "",
         source=args.source,
         expert_name=args.expert,
+        dry_run=args.dry_run,
         supabase=supabase,
         openai_client=openai_client,
     ))
