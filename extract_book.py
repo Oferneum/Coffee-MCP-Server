@@ -255,17 +255,20 @@ def normalize_entity_name(name: str) -> str:
     )
 
 
+_SKIP_NORMALIZE = {"Expert"}
+
 def normalize_node_names(nodes: list[dict], edges: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Apply normalize_entity_name to every node name and edge source/target name."""
+    """Apply normalize_entity_name to every node name and edge source/target name.
+    Expert nodes are skipped — their names are domain names or author strings."""
     for node in nodes:
-        if "name" in node:
+        if "name" in node and node.get("node_type") not in _SKIP_NORMALIZE:
             node["name"] = normalize_entity_name(node["name"])
     for edge in edges:
         src = edge.get("source")
         tgt = edge.get("target")
-        if isinstance(src, list) and len(src) >= 2:
+        if isinstance(src, list) and len(src) >= 2 and src[0] not in _SKIP_NORMALIZE:
             edge["source"] = [src[0], normalize_entity_name(src[1])]
-        if isinstance(tgt, list) and len(tgt) >= 2:
+        if isinstance(tgt, list) and len(tgt) >= 2 and tgt[0] not in _SKIP_NORMALIZE:
             edge["target"] = [tgt[0], normalize_entity_name(tgt[1])]
     return nodes, edges
 
