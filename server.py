@@ -440,25 +440,6 @@ def _vector_search_raw(embedding: list[float], threshold: float = 0.2, count: in
     return resp.data or []
 
 
-_ACRONYMS = {
-    "rdt":  "ross droplet technique",
-    "wdt":  "weiss distribution technique",
-    "tds":  "total dissolved solids",
-    "ey":   "extraction yield",
-    "pid":  "pid controller",
-    "sca":  "specialty coffee association",
-    "vst":  "vst basket",
-    "v60":  "v60",
-}
-
-def _extract_mentioned_nodes(query: str) -> list[dict]:
-    all_nodes = supabase.table("knowledge_nodes").select("id, node_type, name, properties").execute().data
-    q = query.lower()
-    # Expand known acronyms so substring matching finds the full node name.
-    for acronym, expansion in _ACRONYMS.items():
-        if re.search(r"\b" + acronym + r"\b", q):
-            q = q + " " + expansion
-    return [n for n in all_nodes if n["name"].lower() in q]
 
 
 def _enrich_node(node: dict, similarity: float | None = None) -> str:
@@ -497,33 +478,21 @@ def _enrich_node(node: dict, similarity: float | None = None) -> str:
 
 # --- Orchestration helpers (new) ---------------------------------------------
 
-def _unified_search(query: str) -> str:
-    """Entity extraction + vector search + graph enrichment. Returns formatted string."""
+def _unified_search(query: str, embedding: list[float]) -> str:
+    """Vector search + graph enrichment. Returns formatted string."""
     sections: list[str] = []
     seen_ids: set[str] = set()
 
-    mentioned   = _extract_mentioned_nodes(query)
-    embedding   = _embed(query)
     vector_hits = _vector_search_raw(embedding, threshold=0.2, count=5)
     high_conf   = [r for r in vector_hits if (r.get("similarity") or 0) >= 0.6]
     low_conf    = [r for r in vector_hits if 0.2 <= (r.get("similarity") or 0) < 0.6]
 
     sections.append(
-        f"  {len(mentioned)} entity mention(s)  |  "
-        f"{len(vector_hits)} vector hit(s)  |  "
+        f"  {len(vector_hits)} vector hit(s)  |  "
         f"{len(high_conf)} high-confidence (≥ 0.6)"
     )
 
     enrich_budget = 3
-
-    if mentioned:
-        sections.append("── IDENTIFIED ENTITIES ──")
-        for node in mentioned[:enrich_budget]:
-            if node["id"] not in seen_ids:
-                seen_ids.add(node["id"])
-                sections.append(_enrich_node(node))
-                sections.append("")
-                enrich_budget -= 1
 
     if high_conf and enrich_budget > 0:
         sections.append("── HIGH-CONFIDENCE SEMANTIC MATCHES (similarity ≥ 0.6) ──")
@@ -773,14 +742,7 @@ def _get_defect_graph_context(query: str) -> str:
     """
     Scan `query` for known Defect node names and return a structured block
     showing what CAUSES each matched defect and what PREVENTS it.
-
-    Two discovery passes:
-      1. Static map (_DEFECT_WORD_MAP) — fast lowercase substring match.
-      2. Entity extraction (_extract_mentioned_nodes) — catches Defect nodes
-         whose names don't appear in the static map (e.g. nodes added via
-         book ingestion after this code was written).
-
-    Caps at 2 defects to keep the context block tight.
+    Uses _DEFECT_WORD_MAP for discovery. Caps at 2 defects.
     """
     q = query.lower()
 
@@ -789,11 +751,6 @@ def _get_defect_graph_context(query: str) -> str:
     for word, name in _DEFECT_WORD_MAP.items():
         if word in q and name not in defect_names:
             defect_names.append(name)
-
-    # Pass 2: entity extraction (catches future nodes not in the static map)
-    for node in _extract_mentioned_nodes(query):
-        if node["node_type"] == "Defect" and node["name"] not in defect_names:
-            defect_names.append(node["name"])
 
     if not defect_names:
         return ""
@@ -1344,13 +1301,14 @@ def ask(query: str) -> str:
         # 3. User context
         parts.append(_get_user_context())
 
-        # 4. Unified retrieval (entity + vector + graph enrichment)
-        retrieval = _unified_search(query)
+        # 4. Unified retrieval (vector search + graph enrichment)
+        embedding = _embed(query)
+        retrieval = _unified_search(query, embedding)
         parts.append(f"── KNOWLEDGE RETRIEVAL ──\n{retrieval}")
 
         # 4. Intent-specific enrichment
         if intent == "brewing":
-            brew_methods = [n for n in _extract_mentioned_nodes(query) if n["node_type"] == "BrewMethod"]
+            brew_methods = [n for n in _vector_search_raw(embedding, count=10) if n["node_type"] == "BrewMethod"]
             if brew_methods:
                 # Named brew method: fetch its rules + diagnose the most recent
                 # shot made with that method.  This grounds the answer in the
@@ -1418,7 +1376,7 @@ def ask(query: str) -> str:
             # recent shot and infer its method.
 
             mentioned_methods = [
-                n for n in _extract_mentioned_nodes(query)
+                n for n in _vector_search_raw(embedding, count=10)
                 if n["node_type"] == "BrewMethod"
             ]
             if mentioned_methods:
