@@ -903,46 +903,20 @@ def _parse_value_range(value_range: str) -> tuple[float, float] | None:
     return None
 
 
-def _get_corrective_action(parameter: str, side: str, brew_method: str) -> str:
-    """
-    Return a concrete, method-aware corrective instruction for a parameter
-    violation.  `side` is "below" or "above".
-
-    Specificity hierarchy: exact match → parameter+side fallback → generic.
-    """
-    lookup: dict[tuple, str] = {
-        ("extraction_time",  "below", "Espresso"):  "Grind 1-2 steps finer to slow flow and extend extraction time",
-        ("extraction_time",  "above", "Espresso"):  "Grind 1-2 steps coarser to speed up flow",
-        ("yield_ratio",      "below", "Espresso"):  "Let the shot run longer — stop when yield hits target weight on the scale",
-        ("yield_ratio",      "above", "Espresso"):  "Stop the shot earlier — reduce your yield target",
-        ("brew_ratio",       "below", "V60"):        "Use less coffee or more water to approach the 1:15–1:17 window",
-        ("brew_ratio",       "above", "V60"):        "Use more coffee or less water",
-        ("brew_ratio",       "below", "Chemex"):     "Use less coffee or more water",
-        ("brew_ratio",       "above", "Chemex"):     "Use more coffee or less water",
-        ("brew_ratio",       "below", "French Press"): "Use less coffee or more water",
-        ("brew_ratio",       "above", "French Press"): "Use more coffee or less water",
-        ("water_temperature","below", "Espresso"):   "Raise boiler setpoint or flush the group head for 5-8s before pulling",
-        ("water_temperature","above", "Espresso"):   "Lower boiler setpoint or allow machine to cool 20-30s before pulling",
-        ("water_temperature","below", "V60"):        "Bring water closer to 96°C — use a temperature-controlled kettle or pour sooner after boiling",
-        ("water_temperature","above", "V60"):        "Allow boiled water to cool for 30-60s before pouring",
-    }
-    specific = lookup.get((parameter, side, brew_method))
-    if specific:
-        return specific
-    param_fallback = {
-        ("extraction_time",  "below"): "Grind finer or increase dose to slow extraction",
-        ("extraction_time",  "above"): "Grind coarser or decrease dose to speed up extraction",
-        ("brew_ratio",       "below"): "Use less coffee or more water to increase ratio",
-        ("brew_ratio",       "above"): "Use more coffee or less water to decrease ratio",
-        ("yield_ratio",      "below"): "Pull more liquid to reach target yield",
-        ("yield_ratio",      "above"): "Stop the shot sooner",
-        ("water_temperature","below"): "Use hotter water",
-        ("water_temperature","above"): "Use cooler water",
-    }
-    fallback = param_fallback.get((parameter, side))
-    if fallback:
-        return fallback
-    return f"Adjust {parameter.replace('_', ' ')} {'up' if side == 'below' else 'down'} toward target range"
+def _corrective_action_from_rule(p: dict, side: str) -> str:
+    """Derive a corrective action from the BrewingRule's own properties."""
+    if explicit := p.get("corrective_action"):
+        return explicit
+    dictates  = p.get("dictates", {})
+    param     = dictates.get("parameter", "parameter").replace("_", " ")
+    val_range = dictates.get("value_range", "target range")
+    unit      = dictates.get("unit", "")
+    direction = "Increase" if side == "below" else "Decrease"
+    target    = f"{val_range} {unit}".strip()
+    description = p.get("description", "")
+    if description:
+        return f"{direction} {param} toward {target}. Rule: {description}"
+    return f"{direction} {param} toward {target}"
 
 
 def _diagnose_shot(shot: dict) -> str:
@@ -1058,7 +1032,7 @@ def _diagnose_shot(shot: dict) -> str:
                 })
             else:
                 side   = "below" if actual < lo else "above"
-                action = _get_corrective_action(param, side, method["name"])
+                action = _corrective_action_from_rule(p, side)
                 violated.append({
                     "rule":        rule["name"],
                     "param":       param,
