@@ -22,6 +22,8 @@ from extract_book import (
     build_schema_guide,
     chunk_text,
     extract_from_chunk,
+    normalize_entity_name,
+    normalize_node_names,
     normalize_edges,
     deduplicate_nodes,
     deduplicate_edges,
@@ -211,6 +213,7 @@ def run(query: str, url: str, file: str, source: str, expert_name: str, supabase
 
     # 5. Normalize → dedup → validate
     print(f"\n[5/6] Normalising, deduplicating, validating ...")
+    all_nodes, all_edges = normalize_node_names(all_nodes, all_edges)
     all_edges = normalize_edges(all_edges)
     all_nodes = deduplicate_nodes(all_nodes)
     all_edges = deduplicate_edges(all_edges)

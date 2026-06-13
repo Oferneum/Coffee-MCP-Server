@@ -21,6 +21,7 @@ Usage:
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -242,6 +243,32 @@ def extract_from_chunk(
 # =============================================================================
 # DEDUPLICATION
 # =============================================================================
+
+def normalize_entity_name(name: str) -> str:
+    """Title-case a node name, preserving all-caps acronyms (WDT, TDS, PID)."""
+    def _cap_token(t: str) -> str:
+        return t if (t.isupper() and len(t) > 1) else t.capitalize()
+    tokens = re.split(r'(\s+|-)', name.strip())
+    return "".join(
+        _cap_token(t) if not re.match(r'[\s-]', t) else t
+        for t in tokens
+    )
+
+
+def normalize_node_names(nodes: list[dict], edges: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Apply normalize_entity_name to every node name and edge source/target name."""
+    for node in nodes:
+        if "name" in node:
+            node["name"] = normalize_entity_name(node["name"])
+    for edge in edges:
+        src = edge.get("source")
+        tgt = edge.get("target")
+        if isinstance(src, list) and len(src) >= 2:
+            edge["source"] = [src[0], normalize_entity_name(src[1])]
+        if isinstance(tgt, list) and len(tgt) >= 2:
+            edge["target"] = [tgt[0], normalize_entity_name(tgt[1])]
+    return nodes, edges
+
 
 def deduplicate_nodes(nodes: list[dict]) -> list[dict]:
     """
