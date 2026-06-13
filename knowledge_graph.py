@@ -680,17 +680,6 @@ NODES = [
             "corrective_action": "Brew at 94-96°C to extract more from dense under-developed cells; sourcing fix is better roasted coffee"
         }
     },
-    {
-        "node_type": "Defect",
-        "name": "Sourness",
-        "properties": {
-            "stage": "Brewing",
-            "sensory_description": "Sharp, harsh acidity that dominates the cup — distinct from the clean citrus brightness of a well-extracted coffee; raw, unbalanced, mouth-puckering",
-            "primary_cause": "Under-extraction: water temperature too low, extraction time too short, or grind too coarse — acids dissolve first but sweetness and body compounds never follow",
-            "severity": "Medium — fully correctable by adjusting brew parameters",
-            "corrective_action": "Increase water temperature toward 93–96°C, extend extraction time, or grind finer to slow flow and allow sweetness compounds to dissolve"
-        }
-    },
 
     # =========================================================================
     # BREWING TECHNIQUES (5)
@@ -1331,25 +1320,12 @@ EDGE_DEFINITIONS = [
     {"source": ("Defect", "Sour Ferment"), "target": ("FlavorNote", "Earthy"), "relationship": "CAUSES",
      "properties": {"source": "SCA Green Coffee Processing Module", "confidence": 0.78, "evidence": "Over-fermentation introduces Bacillus and mould compounds that often co-present as earthy mustiness alongside the vinegar note"}},
 
-    # Water Temperature → Sourness: low brew temperature dissolves acids first
-    # but leaves sweetness compounds under-extracted.
-    {"source": ("BrewParameter", "Water Temperature"), "target": ("Defect", "Sourness"), "relationship": "CAUSES",
-     "properties": {"confidence": 0.93, "evidence": "Below-range brew temperature preferentially dissolves chlorogenic acids and citric acid; higher-molecular-weight sweetness compounds require more thermal energy and remain under-extracted — producing a sour, unbalanced cup"}},
-    # Extraction Time → Sourness: short contact time cuts extraction before
-    # sweetness develops.
-    {"source": ("BrewParameter", "Extraction Time"), "target": ("Defect", "Sourness"), "relationship": "CAUSES",
-     "properties": {"confidence": 0.91, "evidence": "Acids are the most soluble compounds and dissolve within the first seconds of extraction; without sufficient time, sweetness and body never develop to balance them"}},
-
     # --- PREVENTS: technique/rule → defect mitigation ---
     # WDT is the primary mechanical fix for channeling.
     # Bloom Pre-Infusion prevents Grassy by ensuring the full brew water
     # contacts the grounds (un-bloomed brews often taste flat or raw).
     {"source": ("BrewingTechnique", "WDT"), "target": ("Defect", "Channeling"), "relationship": "PREVENTS",
      "properties": {"source": "Scott Rao — The Professional Barista's Handbook", "confidence": 0.93, "evidence": "WDT physically disrupts clumps that create preferential flow paths; the most widely recommended channeling prevention technique"}},
-    {"source": ("BrewingRule", "Espresso Extraction Window"), "target": ("Defect", "Sourness"), "relationship": "PREVENTS",
-     "properties": {"confidence": 0.92, "evidence": "Pulling within the 25–35s window ensures acids are balanced by sweetness compounds that dissolve in the later phase of extraction"}},
-    {"source": ("BrewingRule", "High Temp for Light Roast"), "target": ("Defect", "Sourness"), "relationship": "PREVENTS",
-     "properties": {"confidence": 0.90, "evidence": "Higher brew temperature provides the thermal energy needed to dissolve sweetness compounds in dense light-roast cells, correcting the sour imbalance"}},
     {"source": ("BrewingRule", "Bloom Pre-Infusion"), "target": ("Defect", "Grassy"), "relationship": "PREVENTS",
      "properties": {"source": "SCA Brewing Standards; Barista Hustle", "confidence": 0.80, "evidence": "Proper bloom fully wets the coffee bed; skipping bloom in fresh coffee causes CO2 pockets that result in uneven, under-extracted (grassy) patches"}},
 
