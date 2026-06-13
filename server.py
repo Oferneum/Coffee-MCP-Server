@@ -738,43 +738,28 @@ def _classify_intent_keyword(query: str) -> str:
 # what causes or prevents a defect — it only reads what the graph says.
 # =============================================================================
 
-def _get_defect_graph_context(query: str) -> str:
+def _get_defect_graph_context(embedding: list[float]) -> str:
     """
-    Scan `query` for known Defect node names and return a structured block
+    Find Defect nodes via semantic search and return a structured block
     showing what CAUSES each matched defect and what PREVENTS it.
-    Uses _DEFECT_WORD_MAP for discovery. Caps at 2 defects.
+    Caps at 2 defects.
     """
-    q = query.lower()
+    defect_nodes = [
+        n for n in _vector_search_raw(embedding, threshold=0.2, count=10)
+        if n["node_type"] == "Defect"
+    ][:2]
 
-    # Pass 1: static map
-    defect_names: list[str] = []
-    for word, name in _DEFECT_WORD_MAP.items():
-        if word in q and name not in defect_names:
-            defect_names.append(name)
-
-    if not defect_names:
+    if not defect_nodes:
         return ""
 
     try:
         sections: list[str] = [
-            f"── DEFECT GRAPH CONTEXT ({len(defect_names)} defect(s) identified) ──"
+            f"── DEFECT GRAPH CONTEXT ({len(defect_nodes)} defect(s) identified) ──"
         ]
 
-        for defect_name in defect_names[:2]:
-            defect_rows = (
-                supabase.table("knowledge_nodes")
-                .select("id, name, properties")
-                .eq("node_type", "Defect")
-                .eq("name", defect_name)
-                .execute()
-                .data
-            )
-            if not defect_rows:
-                continue
-
-            defect    = defect_rows[0]
+        for defect in defect_nodes:
             defect_id = defect["id"]
-            p         = defect["properties"]
+            p         = defect.get("properties") or {}
 
             sections.append(f"\n[Defect] {defect['name']}")
             sections.append(f"  Stage    : {p.get('stage', '?')}")
@@ -1408,7 +1393,7 @@ def ask(query: str) -> str:
             # Defect graph traversal — this is what makes the answer
             # neuro-symbolic rather than purely retrieval-based.
             # The LLM should narrate these edges, not re-invent them.
-            defect_ctx = _get_defect_graph_context(query)
+            defect_ctx = _get_defect_graph_context(embedding)
             if defect_ctx:
                 parts.append(defect_ctx)
 
