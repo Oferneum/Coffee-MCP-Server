@@ -457,110 +457,74 @@ def validate_extracted(
 
 
 # =============================================================================
-# UPSERT — nodes with embeddings, then edges
+# UPSERT — generate embeddings in Python, then write everything via one RPC
 # =============================================================================
 
-def upsert_nodes_with_embeddings(
-    supabase_client: Client,
-    openai_client:   OpenAI,
+def generate_embeddings(
+    openai_client: OpenAI,
     nodes: list[dict],
-) -> dict[tuple, str]:
-    """
-    Generate an embedding for every node and upsert to knowledge_nodes.
-    Returns a (node_type, name) → supabase_id map for edge resolution.
-    """
-    id_map: dict[tuple, str] = {}
-
+) -> list[dict]:
+    """Generate and attach an embedding to each node. Returns nodes with embedding field set."""
     for node in nodes:
         node_type = node.get("node_type", "")
         name      = node.get("name", "")
-
-        # Build content string — same logic as ingest.py for consistency
-        parts = [f"Name: {name}", f"Type: {node_type}"]
+        parts     = [f"Name: {name}", f"Type: {node_type}"]
         for k, v in node.get("properties", {}).items():
             val = ", ".join(str(x) for x in v) if isinstance(v, list) else str(v)
             parts.append(f"{k}: {val}")
         content = ". ".join(parts)
 
         print(f"  Embedding [{node_type}] {name}...", end=" ", flush=True)
-
         try:
-            embedding = openai_client.embeddings.create(
+            node["embedding"] = openai_client.embeddings.create(
                 model="text-embedding-3-small",
-                input=content[:8000],   # stay well within token limit
+                input=content[:8000],
             ).data[0].embedding
-
-            result = supabase_client.table("knowledge_nodes").upsert(
-                {
-                    "node_type":  node_type,
-                    "name":       name,
-                    "properties": node.get("properties", {}),
-                    "embedding":  embedding,
-                },
-                on_conflict="node_type,name",
-            ).execute()
-
-            if result.data:
-                id_map[(node_type, name)] = result.data[0]["id"]
-                print("✓")
-            else:
-                print("✗ (no data returned)")
-
+            print("✓")
         except Exception as e:
             print(f"✗ ({e})")
 
-    return id_map
+    return nodes
 
 
-def upsert_edges(
+def ingest_document_rpc(
     supabase_client: Client,
+    nodes: list[dict],
     edges: list[dict],
-    id_map: dict[tuple, str],
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """
-    Resolve node IDs and upsert all edges.
-    Fetches the full node table so edges to pre-existing nodes also resolve.
-    Returns (success_count, skipped_count).
+    Upsert all nodes and edges in a single Postgres transaction via the
+    ingest_document RPC. Edge source/target names are resolved server-side,
+    eliminating the read-then-write race condition of the multi-call approach.
+    Returns (nodes_upserted, edges_written, edges_skipped).
     """
-    # Build a complete (node_type, name) → id map from the live DB
-    all_nodes  = supabase_client.table("knowledge_nodes").select("id, node_type, name").execute().data
-    full_map   = {(n["node_type"], n["name"]): n["id"] for n in all_nodes}
-    full_map.update(id_map)  # fresh upserts take precedence
-
-    records: list[dict] = []
-    skipped: list[str]  = []
-
+    edge_payload = []
     for edge in edges:
-        src_key = tuple(edge.get("source", []))
-        tgt_key = tuple(edge.get("target", []))
-        src_id  = full_map.get(src_key)
-        tgt_id  = full_map.get(tgt_key)
-
-        if not src_id or not tgt_id:
-            skipped.append(f"{src_key} → {edge.get('relationship')} → {tgt_key}")
+        src = edge.get("source", [])
+        tgt = edge.get("target", [])
+        if not isinstance(src, list) or len(src) < 2:
             continue
-
-        records.append({
-            "source_id":        src_id,
-            "target_id":        tgt_id,
+        if not isinstance(tgt, list) or len(tgt) < 2:
+            continue
+        edge_payload.append({
+            "source_type":      src[0],
+            "source_name":      src[1],
+            "target_type":      tgt[0],
+            "target_name":      tgt[1],
             "relationship_type": edge.get("relationship"),
             "properties":       edge.get("properties", {}),
         })
 
-    success = 0
-    if records:
-        result  = supabase_client.table("knowledge_edges").upsert(
-            records, on_conflict="source_id,target_id,relationship_type"
-        ).execute()
-        success = len(result.data)
+    result = supabase_client.rpc("ingest_document", {
+        "p_nodes": nodes,
+        "p_edges": edge_payload,
+    }).execute()
 
-    if skipped:
-        print(f"  ⚠  Skipped {len(skipped)} edge(s) — referenced node not found:")
-        for s in skipped[:5]:
-            print(f"     {s}")
-        if len(skipped) > 5:
-            print(f"     … and {len(skipped) - 5} more")
-
-    return success, len(skipped)
+    data = result.data or {}
+    return (
+        data.get("nodes_upserted", 0),
+        data.get("edges_written",  0),
+        data.get("edges_skipped",  0),
+    )
 
 

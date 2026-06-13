@@ -28,9 +28,8 @@ from extract_book import (
     deduplicate_nodes,
     deduplicate_edges,
     validate_extracted,
-    ensure_expert_node,
-    upsert_nodes_with_embeddings,
-    upsert_edges,
+    generate_embeddings,
+    ingest_document_rpc,
 )
 
 load_dotenv()
@@ -247,16 +246,15 @@ def run(query: str, url: str, file: str, source: str, expert_name: str, supabase
     for node in valid_nodes:
         node.setdefault("properties", {})["_source"] = doc_id
 
-    # 6. Upsert to Supabase
+    # 6. Generate embeddings then write everything in one transaction
     print(f"\n[6/6] Writing to Supabase ...")
-    ensure_expert_node(supabase, openai_client, expert)
-    id_map = upsert_nodes_with_embeddings(supabase, openai_client, valid_nodes)
-    edge_ok, edge_skip = upsert_edges(supabase, valid_edges, id_map)
+    valid_nodes = generate_embeddings(openai_client, valid_nodes)
+    nodes_ok, edge_ok, edge_skip = ingest_document_rpc(supabase, valid_nodes, valid_edges)
 
     print(f"\n✓ Done.")
     print(f"  Source  : {os.path.abspath(chosen) if file else chosen}")
     print(f"  Expert  : {expert}")
-    print(f"  Nodes   : {len(id_map)} upserted")
+    print(f"  Nodes   : {nodes_ok} upserted")
     print(f"  Edges   : {edge_ok} written, {edge_skip} skipped")
     return 0
 
