@@ -1660,13 +1660,13 @@ from extract_book import (
     build_schema_guide,
     chunk_text,
     extract_from_chunk,
+    normalize_node_names,
     normalize_edges,
     deduplicate_nodes,
     deduplicate_edges,
     validate_extracted,
-    ensure_expert_node,
-    upsert_nodes_with_embeddings,
-    upsert_edges,
+    generate_embeddings,
+    ingest_document_rpc,
 )
 
 
@@ -1813,6 +1813,7 @@ def _run_research_ingest(query: str, url: str, source_name: str) -> str:
         all_edges.extend(result.get("edges", []))
 
     # 5. Normalize edge direction → dedup → validate against schema.py
+    all_nodes, all_edges = normalize_node_names(all_nodes, all_edges)
     all_edges = normalize_edges(all_edges)
     all_nodes = deduplicate_nodes(all_nodes)
     all_edges = deduplicate_edges(all_edges)
@@ -1822,16 +1823,17 @@ def _run_research_ingest(query: str, url: str, source_name: str) -> str:
     if len(valid_nodes) <= 1:   # only the Expert stub survived
         return f"No schema-conformant knowledge could be extracted from {chosen}."
 
-    # 6. Inject — duplicate-safe upserts
-    ensure_expert_node(supabase, openai_client, expert)
-    id_map = upsert_nodes_with_embeddings(supabase, openai_client, valid_nodes)
-    edge_ok, edge_skip = upsert_edges(supabase, valid_edges, id_map)
+    # 6. Generate embeddings then write everything in one atomic transaction
+    for node in valid_nodes:
+        node.setdefault("properties", {})["_source"] = chosen
+    valid_nodes = generate_embeddings(openai_client, valid_nodes)
+    nodes_ok, edge_ok, edge_skip = ingest_document_rpc(supabase, valid_nodes, valid_edges)
 
     breakdown = Counter(n["node_type"] for n in valid_nodes)
     lines = [
         f"✓ Ingested research from: {chosen}",
         f"  Provenance (Expert): {expert}",
-        f"  Nodes upserted: {len(id_map)}  |  Edges written: {edge_ok} (skipped {edge_skip})",
+        f"  Nodes upserted: {nodes_ok}  |  Edges written: {edge_ok} (skipped {edge_skip})",
         "  Node breakdown: " + ", ".join(f"{t}:{c}" for t, c in sorted(breakdown.items(), key=lambda x: -x[1])),
     ]
     return "\n".join(lines)
