@@ -6,15 +6,16 @@
 
 ## Architecture: Semantic Layer
 
-The server exposes **6 public MCP tools** to the LLM (5 general + 1 admin-only). All internal graph/vector routing is handled server-side.
+The server exposes **7 public MCP tools** to the LLM (6 general + 1 admin-only). All internal graph/vector routing is handled server-side.
 
 ```
 LLM (Bean)
-  ├── ask(query)              ← primary entry point for all knowledge queries
-  ├── log_shot(...)           ← record a brew; returns graph-grounded diagnosis
-  ├── get_recommendations()   ← VFM analysis + graph-paired origin suggestions
-  ├── introspect()            ← live schema registry: node types, counts, relationships
-  ├── seed_knowledge_graph()  ← admin: upsert NODES + EDGE_DEFINITIONS to Supabase
+  ├── ask(query)                          ← primary entry point for all knowledge queries
+  ├── log_shot(...)                       ← record a brew; returns graph-grounded diagnosis
+  ├── diagnose_shot(shot_id, user_id?)    ← fast graph diagnosis by shot ID; skips intent/embedding/vector search
+  ├── get_recommendations()               ← VFM analysis + graph-paired origin suggestions
+  ├── introspect()                        ← live schema registry: node types, counts, relationships
+  ├── seed_knowledge_graph()              ← admin: upsert NODES + EDGE_DEFINITIONS to Supabase
   └── research_and_ingest_topic(query|url)  ← ADMIN-ONLY: web search → scrape → LLM extract → graph inject
 ```
 

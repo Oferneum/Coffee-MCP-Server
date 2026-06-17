@@ -1464,6 +1464,29 @@ def log_shot(
 
 
 @mcp.tool()
+def diagnose_shot(shot_id: str, user_id: str = None) -> str:
+    """
+    Diagnose a specific shot by ID against the BrewingRules in the knowledge
+    graph. Skips intent classification, query embedding, and vector search that
+    ask() does — much faster when shot_id is already known (e.g. immediately
+    after log_shot() returns).
+
+    Returns VIOLATED / COMPLIANT / CONTEXT / UNCHECKED for every rule that
+    applies to the shot's brew method, with corrective actions for violations.
+    """
+    try:
+        query = supabase.table("shots").select("*").eq("id", shot_id)
+        if user_id:
+            query = query.eq("user_id", user_id)
+        resp = query.execute()
+        if not resp.data:
+            return f"No shot found with ID '{shot_id}'."
+        return _diagnose_shot(resp.data[0])
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
 def get_recommendations() -> str:
     """
     PERSONALISED RECOMMENDATIONS — Get tailored coffee suggestions grounded
