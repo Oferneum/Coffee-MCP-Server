@@ -969,13 +969,17 @@ def _diagnose_shot(shot: dict) -> str:
         yield_g = float(shot.get("yield") or shot.get("yield_g") or 0)
         ratio  = round(yield_g / dose, 3) if dose > 0 else None
 
+        brew_temp = _safe_float(shot.get("brew_temp"))
         shot_values: dict[str, float | None] = {
-            "water_temperature": _safe_float(shot.get("brew_temp")),
+            "water_temperature": brew_temp,
+            "brew_temperature":  brew_temp,  # alias used by SCA / machine-standard rules
             "extraction_time":   _safe_float(shot.get("extraction_time")),
             "brew_ratio":        ratio,
-            "yield_ratio":       ratio,   # same computation, different rule names
-            "bloom_time":        None,    # not tracked in shots table
-            "grind_size":        None,    # stored as setting string, not microns
+            "yield_ratio":       ratio,       # same value, different rule parameter names
+            "bloom_time":        None,        # not tracked in shots table
+            "grind_size":        None,        # stored as setting string, not microns
+            "extraction_yield":  None,        # requires TDS meter — not in shots table
+            "brew_concentration": None,       # requires TDS meter — not in shots table
         }
 
         # ── 4. Evaluate each rule ────────────────────────────────────────────

@@ -168,6 +168,12 @@ RULES:
     BrewParameter or BrewMethod they describe, and SOURCED_FROM edges to the Expert.
     Use CAUSES when a physical phenomenon (e.g. high flow resistance) produces a
     brewing outcome (e.g. channeling).
+11. Every BrewingRule and BrewingTechnique MUST have an APPLIES_TO edge pointing to
+    the BrewMethod it governs. Infer the method from the passage context — if the
+    passage is about espresso machines or espresso preparation, use BrewMethod "Espresso";
+    if it discusses V60, pour-over, French press, etc., use the matching BrewMethod name.
+    Only omit APPLIES_TO when the rule genuinely applies to all brew methods equally
+    (e.g. a universal water chemistry rule). When in doubt, include it.
 
 OUTPUT FORMAT — respond ONLY with valid JSON, no other text:
 {{
