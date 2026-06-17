@@ -243,8 +243,13 @@ def run(query: str, url: str, file: str, source: str, expert_name: str, supabase
     # purge_source can find them reliably on re-ingestion. Uses `chosen`, not
     # `expert` — an author may publish multiple papers; purging by author would
     # wipe all of them.
+    # Taxonomy/backbone node types are shared across sources — stamping _source
+    # on them would cause purge to delete the node (and cascade-wipe all edges
+    # targeting it) on the next re-ingest of ANY document.
+    _SKIP_SOURCE_STAMP = {"BrewMethod", "Origin", "Region", "RoastLevel", "ProcessMethod", "FlavorNote"}
     for node in valid_nodes:
-        node.setdefault("properties", {})["_source"] = doc_id
+        if node.get("node_type") not in _SKIP_SOURCE_STAMP:
+            node.setdefault("properties", {})["_source"] = doc_id
 
     # 6. Generate embeddings then write everything in one transaction
     print(f"\n[6/6] Writing to Supabase ...")

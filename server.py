@@ -1851,8 +1851,10 @@ def _run_research_ingest(query: str, url: str, source_name: str) -> str:
         return f"No schema-conformant knowledge could be extracted from {chosen}."
 
     # 6. Generate embeddings then write everything in one atomic transaction
+    _SKIP_SOURCE_STAMP = {"BrewMethod", "Origin", "Region", "RoastLevel", "ProcessMethod", "FlavorNote"}
     for node in valid_nodes:
-        node.setdefault("properties", {})["_source"] = chosen
+        if node.get("node_type") not in _SKIP_SOURCE_STAMP:
+            node.setdefault("properties", {})["_source"] = chosen
     valid_nodes = generate_embeddings(openai_client, valid_nodes)
     nodes_ok, edge_ok, edge_skip = ingest_document_rpc(supabase, valid_nodes, valid_edges)
 
