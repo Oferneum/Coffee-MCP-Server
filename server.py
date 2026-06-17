@@ -1117,7 +1117,7 @@ def _safe_float(value) -> float | None:
 def seed_knowledge_graph() -> str:
     """
     ADMIN — Seeds the knowledge_nodes and knowledge_edges Supabase tables with
-    the full static coffee domain knowledge graph (60 nodes, 89 edges).
+    the static coffee domain knowledge graph defined in knowledge_graph.py.
     Uses upsert — safe to re-run without creating duplicates.
     Requires SUPABASE_KEY to be set to the service role key.
     """
