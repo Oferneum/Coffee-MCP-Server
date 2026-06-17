@@ -28,6 +28,7 @@ from extract_book import (
     deduplicate_nodes,
     deduplicate_edges,
     validate_extracted,
+    check_brew_rule_duplicates,
     generate_embeddings,
     ingest_document_rpc,
 )
@@ -227,6 +228,16 @@ def run(query: str, url: str, file: str, source: str, expert_name: str, supabase
     if len(valid_nodes) <= 1:
         print(f"\nNo schema-conformant knowledge extracted from {chosen}.", file=sys.stderr)
         return 1
+
+    # 5b. Duplicate-check: screen new BrewingRules against existing DB nodes.
+    # Only exact/near-exact (parameter + value_range + direction) matches are
+    # flagged — different ranges from different sources are NOT duplicates.
+    valid_nodes, dup_log = check_brew_rule_duplicates(supabase, valid_nodes)
+    if dup_log:
+        print(f"  Duplicates skipped: {len(dup_log)}")
+        for dup in dup_log:
+            print(f"    SKIP '{dup['new_node']}' — duplicate of '{dup['duplicate_of']}' "
+                  f"(param={dup['parameter']}, range={dup['value_range']!r}, dir={dup['direction']})")
 
     breakdown = Counter(n["node_type"] for n in valid_nodes)
     print(f"  {len(valid_nodes)} valid nodes, {len(valid_edges)} valid edges.")

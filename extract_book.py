@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import json
+import re
 import time
 from collections import Counter
 from dotenv import load_dotenv
@@ -461,6 +462,88 @@ def validate_extracted(
         print(f"  ⚠  {w}")
 
     return valid_nodes, valid_edges, errors
+
+
+# =============================================================================
+# DUPLICATE CHECK — screen incoming BrewingRules against the live DB
+# =============================================================================
+
+def _normalize_range(s: str) -> str:
+    """Normalise a value_range string: lowercase, uniform dashes, collapsed whitespace."""
+    s = str(s).strip().lower()
+    s = s.replace("–", "-").replace("—", "-")  # en/em dash → hyphen
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def check_brew_rule_duplicates(
+    supabase_client: Client,
+    nodes: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """
+    Screen new BrewingRule nodes against existing ones in Supabase.
+
+    A node is a duplicate when an existing BrewingRule shares the same
+    dictates.parameter, dictates.direction, AND dictates.value_range
+    (after trivial normalisation: case, dash style, whitespace).
+
+    Different value_range or direction = different claim from a different
+    source = NOT a duplicate, even if the name or topic looks similar.
+    The LLM never judges "conceptual similarity" — only exact/near-exact
+    field matches count.
+
+    Returns:
+        unique_nodes  — all non-BrewingRule nodes + non-duplicate BrewingRules
+        duplicate_log — list of dicts {new_node, duplicate_of, parameter,
+                        value_range, direction} — logged for review, never
+                        silently dropped or silently merged.
+    """
+    new_rules = [n for n in nodes if n.get("node_type") == "BrewingRule"]
+    other     = [n for n in nodes if n.get("node_type") != "BrewingRule"]
+
+    if not new_rules:
+        return nodes, []
+
+    unique_rules:  list[dict] = []
+    duplicate_log: list[dict] = []
+
+    for node in new_rules:
+        d         = node.get("properties", {}).get("dictates", {})
+        param     = d.get("parameter", "").strip()
+        new_range = _normalize_range(d.get("value_range", ""))
+        new_dir   = d.get("direction", "").strip()
+
+        if not param:
+            unique_rules.append(node)
+            continue
+
+        existing = supabase_client.table("knowledge_nodes") \
+            .select("name, properties") \
+            .eq("node_type", "BrewingRule") \
+            .eq("properties->dictates->>parameter", param) \
+            .execute().data
+
+        matched = next(
+            (ex for ex in existing
+             if _normalize_range(
+                 ex["properties"].get("dictates", {}).get("value_range", "")
+             ) == new_range
+             and ex["properties"].get("dictates", {}).get("direction", "").strip() == new_dir),
+            None,
+        )
+
+        if matched:
+            duplicate_log.append({
+                "new_node":     node["name"],
+                "duplicate_of": matched["name"],
+                "parameter":    param,
+                "value_range":  d.get("value_range", ""),
+                "direction":    new_dir,
+            })
+        else:
+            unique_rules.append(node)
+
+    return other + unique_rules, duplicate_log
 
 
 # =============================================================================

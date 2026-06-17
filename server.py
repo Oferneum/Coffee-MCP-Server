@@ -1692,6 +1692,7 @@ from extract_book import (
     deduplicate_nodes,
     deduplicate_edges,
     validate_extracted,
+    check_brew_rule_duplicates,
     generate_embeddings,
     ingest_document_rpc,
 )
@@ -1849,6 +1850,14 @@ def _run_research_ingest(query: str, url: str, source_name: str) -> str:
         return "Extraction produced schema errors; nothing was written:\n  - " + "\n  - ".join(errors)
     if len(valid_nodes) <= 1:   # only the Expert stub survived
         return f"No schema-conformant knowledge could be extracted from {chosen}."
+
+    # 5b. Duplicate-check against live DB before writing anything
+    valid_nodes, dup_log = check_brew_rule_duplicates(supabase, valid_nodes)
+    if dup_log:
+        print(f"[research] duplicate BrewingRules skipped ({len(dup_log)}):")
+        for dup in dup_log:
+            print(f"[research]   SKIP '{dup['new_node']}' — duplicate of '{dup['duplicate_of']}' "
+                  f"(param={dup['parameter']}, range={dup['value_range']!r}, dir={dup['direction']})")
 
     # 6. Generate embeddings then write everything in one atomic transaction
     _SKIP_SOURCE_STAMP = {"BrewMethod", "Origin", "Region", "RoastLevel", "ProcessMethod", "FlavorNote"}
