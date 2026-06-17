@@ -172,8 +172,9 @@ RULES:
     the BrewMethod it governs. Infer the method from the passage context — if the
     passage is about espresso machines or espresso preparation, use BrewMethod "Espresso";
     if it discusses V60, pour-over, French press, etc., use the matching BrewMethod name.
-    Only omit APPLIES_TO when the rule genuinely applies to all brew methods equally
-    (e.g. a universal water chemistry rule). When in doubt, include it.
+    When a rule applies universally to all brew methods (e.g. a water chemistry rule),
+    create APPLIES_TO edges to every relevant BrewMethod node — never omit the edge
+    because a rule is universal. When in doubt, include it.
 
 OUTPUT FORMAT — respond ONLY with valid JSON, no other text:
 {{
